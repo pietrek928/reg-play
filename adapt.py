@@ -4,7 +4,7 @@ from torch import Tensor, tensor
 from torch.optim import Adam
 
 from grad import sum_vals, GradVar
-from model import Model, Values, validate_values, init_zero_params
+from model import Model, Values, validate_values, init_zero_params, init_torch_models, get_parameters
 from obj import Block, Tm
 
 
@@ -31,7 +31,10 @@ def fill_with_grad(m: Tm) -> Tm:
     })
 
 
-def fit_model(model: Model, dataset: Values, loss_func, loss_limit: float):
+def adapt_model(
+        model: Model, dataset: Values, loss_func,
+        loss_limit: float, target_loss: float, device=None
+):
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
 
@@ -42,14 +45,18 @@ def fit_model(model: Model, dataset: Values, loss_func, loss_limit: float):
     steps_count = dataset_shape_prefix[0]
 
     # Values to be adjusted by optimization
-    params = init_zero_params(model.get_params())
-    start_states = init_zero_params(model.get_state(), base_shape=dataset_shape_prefix)
+    params = init_zero_params(model.get_params(), device=device)
+    torch_models = init_torch_models(model.get_torch_models(), device=device)
+    start_states = init_zero_params(model.get_state(), base_shape=dataset_shape_prefix, device=device)
 
-    optimizer = Adam((params, start_states), lr=1e-6, weight_decay=1e-9)
+    optimizer = Adam(
+        get_parameters(params, start_states, *torch_models.values()),
+        lr=1e-6, weight_decay=1e-9
+    )
 
     step = 0
     loss: Tensor = tensor(1e9)
-    while float(loss) > 1e-3:  # Training loop
+    while float(loss) > target_loss:  # Training loop
 
         optimizer.zero_grad()
         state = start_states
@@ -59,8 +66,8 @@ def fit_model(model: Model, dataset: Values, loss_func, loss_limit: float):
             dataset_step = {
                 k: v[step] for k, v in dataset.items()
             }
-            state, outputs = model.compute_step(params, state, dataset_step)
-            loss_step = loss_func(outputs, dataset)
+            state, outputs = model.compute_step(params, torch_models, state, dataset_step)
+            loss_step = loss_func(outputs, dataset_step)
             if step:
                 if loss_step > loss_limit:
                     break
@@ -72,4 +79,4 @@ def fit_model(model: Model, dataset: Values, loss_func, loss_limit: float):
         optimizer.step()
         print(float(loss), step)
 
-    return params
+    return tuple(get_parameters(params, *torch_models))

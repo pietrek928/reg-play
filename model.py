@@ -1,8 +1,8 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Type, Any
 
 from pydantic import BaseModel
 from torch import float32, dtype, zeros, Tensor
-from torch.nn import Parameter
+from torch.nn import Parameter, Module
 
 
 class ValueDescr(BaseModel):
@@ -12,6 +12,13 @@ class ValueDescr(BaseModel):
     descr: str = ''
 
 
+class TorchModel(BaseModel):
+    model: Type[Module]
+    params: Dict[str, Any] = {}
+    descr: str = ''
+
+
+TorchModelsDescr = Dict[str, TorchModel]
 Values = Dict[str, Tensor]
 ValuesDescr = Dict[str, ValueDescr]
 
@@ -35,37 +42,45 @@ class OutputValue(ValueDescr):
 # TODO: add submodels ?
 class Model(BaseModel):
     @classmethod
-    def get_inputs(cls):
+    def get_inputs(cls) -> ValuesDescr:
         return {
             k: v for k, v in dir(cls)
             if isinstance(v, InputValue)
         }
 
     @classmethod
-    def get_outputs(cls):
+    def get_outputs(cls) -> ValuesDescr:
         return {
             k: v for k, v in dir(cls)
             if isinstance(v, OutputValue)
         }
 
     @classmethod
-    def get_params(cls):
+    def get_params(cls) -> ValuesDescr:
         return {
             k: v for k, v in dir(cls)
             if isinstance(v, ParamValue)
         }
 
     @classmethod
-    def get_state(cls):
+    def get_state(cls) -> ValuesDescr:
         return {
             k: v for k, v in dir(cls)
             if isinstance(v, StateValue)
         }
 
     @classmethod
+    def get_torch_models(cls) -> TorchModelsDescr:
+        return {
+            k: v for k, v in dir(cls)
+            if isinstance(v, TorchModel)
+        }
+
+    @classmethod
     def compute_step(
-            self, params: Values, state: Values, inputs: Values
-    ) -> Tuple[Values, Values]:
+            cls, params: Values, torch_models: Dict[str, Module],
+            state: Values, inputs: Values
+    ) -> Tuple[Values, Values]:  # new_state, outputs
         raise NotImplementedError('compute_step not implemented')
 
 
@@ -83,6 +98,26 @@ def init_zero_params(
             data=zeros(*shape, dtype=v.type, device=device)
         )
     return tensors
+
+
+def init_torch_models(
+        models_descr: TorchModelsDescr, device=None
+) -> Dict[str, Module]:
+    models = {}
+    for k, m in models_descr.items():
+        mm = m.model(**m.params)
+        if device is not None:
+            mm.to(device)
+        models[k] = mm
+    return models
+
+
+def get_parameters(*items):
+    for o in items:
+        if isinstance(o, Module):
+            yield from o.parameters()
+        elif isinstance(o, dict):
+            yield o  # Dict[str, Parameter]
 
 
 def validate_values(values_descr: ValuesDescr, values: Values):
