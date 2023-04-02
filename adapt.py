@@ -33,7 +33,7 @@ def fill_with_grad(m: Tm) -> Tm:
 
 def adapt_model(
         model: Model, dataset: Values, loss_func,
-        loss_limit: float, target_loss: float, device=None
+        target_loss: float, device=None
 ):
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
@@ -41,6 +41,12 @@ def adapt_model(
     dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
     if len(dataset_shape_prefix) != 2:
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+
+    if device is not None:
+        dataset = {
+            k: v.to(device)
+            for k, v in dataset.items()
+        }
 
     steps_count = dataset_shape_prefix[0]
 
@@ -66,17 +72,24 @@ def adapt_model(
             dataset_step = {
                 k: v[step] for k, v in dataset.items()
             }
-            state, outputs = model.compute_step(params, torch_models, state, dataset_step)
+            new_state, outputs = model.compute_step(params, torch_models, state, dataset_step)
             loss_step = loss_func(outputs, dataset_step)
             if step:
-                if loss_step > loss_limit:
+                if loss_step > target_loss:
                     break
                 loss += loss_step
             else:
                 loss = loss_step
 
+            state = new_state
+
+        if loss < target_loss:
+            loss += (1. - sum(
+                v.mean(dim=0).sum() for v in state.values()
+            )).abs()
+
         loss.backward()
         optimizer.step()
-        print(float(loss), step)
+        print(f'{step + 1}/{steps_count} loss={float(loss)}')
 
     return tuple(get_parameters(params, *torch_models))

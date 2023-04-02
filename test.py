@@ -4,8 +4,11 @@ import numpy as np
 from pydantic import BaseModel
 
 from adapt import score_controller, fill_with_grad
+from dab import transform_sim_data
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
+from read_file import CSVNumbersReader
+from utils import sample_many, prepare_dataset
 from vis import plot_controller_sym
 
 
@@ -180,4 +183,12 @@ def optimize():
         print(f'k={k}, ki={ki}')
 
 
-plot_sym()
+# plot_sym()
+r = CSVNumbersReader('/home/pietrek/Downloads/data.csv')
+data = transform_sim_data(
+    r.read(100000000000)
+)
+dataset = prepare_dataset(
+    tuple(sample_many(data, 400, 100, ('VS', 'd', 'I')))
+)
+print(dataset.tensor.shape)

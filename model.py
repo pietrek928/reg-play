@@ -6,8 +6,11 @@ from torch.nn import Parameter, Module
 
 
 class ValueDescr(BaseModel):
+    class Config:
+        arbitrary_types_allowed = True
+
     # Empty means scalar
-    shape: Tuple[int, ...] = ()
+    shape: Tuple[int, ...] = (1,)
     type: dtype = float32
     descr: str = ''
 
