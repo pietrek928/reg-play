@@ -43,39 +43,39 @@ class OutputValue(ValueDescr):
 
 
 # TODO: add submodels ?
-class Model(BaseModel):
+class Model:
     @classmethod
     def get_inputs(cls) -> ValuesDescr:
         return {
-            k: v for k, v in dir(cls)
+            k: v for k, v in vars(cls).items()
             if isinstance(v, InputValue)
         }
 
     @classmethod
     def get_outputs(cls) -> ValuesDescr:
         return {
-            k: v for k, v in dir(cls)
+            k: v for k, v in vars(cls).items()
             if isinstance(v, OutputValue)
         }
 
     @classmethod
     def get_params(cls) -> ValuesDescr:
         return {
-            k: v for k, v in dir(cls)
+            k: v for k, v in vars(cls).items()
             if isinstance(v, ParamValue)
         }
 
     @classmethod
     def get_state(cls) -> ValuesDescr:
         return {
-            k: v for k, v in dir(cls)
+            k: v for k, v in vars(cls).items()
             if isinstance(v, StateValue)
         }
 
     @classmethod
     def get_torch_models(cls) -> TorchModelsDescr:
         return {
-            k: v for k, v in dir(cls)
+            k: v for k, v in vars(cls).items()
             if isinstance(v, TorchModel)
         }
 
@@ -120,7 +120,7 @@ def get_parameters(*items):
         if isinstance(o, Module):
             yield from o.parameters()
         elif isinstance(o, dict):
-            yield o  # Dict[str, Parameter]
+            yield from o.values()
 
 
 def validate_values(values_descr: ValuesDescr, values: Values):

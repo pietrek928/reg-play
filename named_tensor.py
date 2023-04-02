@@ -1,6 +1,6 @@
 from typing import Tuple
 
-from torch import Tensor, ones, cat
+from torch import Tensor, ones, cat, float32
 
 
 class NamedTensor:
@@ -26,6 +26,12 @@ class NamedTensor:
             tensor=cat(values, dim=-1),
             axis_descr=axis_descr
         )
+
+    def values(self, dtype=float32, device=None):
+        return {
+            k: self[..., k].to(dtype=dtype, device=device)
+            for k in self.axis_descr
+        }
 
     @staticmethod
     def _prepare_axis_mapping(axis_descr):
@@ -56,7 +62,8 @@ class NamedTensor:
             if isinstance(d, int):
                 return d
             elif isinstance(d, tuple):
-                return slice(*d)
+                start, end = d
+                return slice(start, end + 1)
             else:
                 raise ValueError(f'Unknown axis_descr type {type(d)}')
 
@@ -73,7 +80,12 @@ class NamedTensor:
         raise ValueError(f'Unknown axis type {type(axis)}')
 
     def __getitem__(self, idx):
-        return self.tensor.__getitem__(self._convert_axis(idx))
+        idx = self._convert_axis(idx)
+        if isinstance(idx, int):
+            idx = slice(idx, idx + 1)
+        if isinstance(idx, tuple) and isinstance(idx[-1], int):
+            idx = (*idx[:-1], slice(idx[-1], idx[-1] + 1))
+        return self.tensor.__getitem__(idx)
 
     def sample_sums(self, start: int, end: int, step: int, mean_axis: Tuple[str, ...] = ()):
         end = (end - start) // step * step + start

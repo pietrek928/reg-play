@@ -1,10 +1,11 @@
-from typing import Callable
+from typing import Callable, Type
 
 from torch import Tensor, tensor
-from torch.optim import Adam
+from torch.optim import SGD
 
 from grad import sum_vals, GradVar
-from model import Model, Values, validate_values, init_zero_params, init_torch_models, get_parameters
+from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
+from named_tensor import NamedTensor
 from obj import Block, Tm
 
 
@@ -32,9 +33,11 @@ def fill_with_grad(m: Tm) -> Tm:
 
 
 def adapt_model(
-        model: Model, dataset: Values, loss_func,
+        model: Type[Model], dataset: NamedTensor, loss_func,
         target_loss: float, device=None
 ):
+    dataset = dataset.values(device=device)
+
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
 
@@ -42,28 +45,21 @@ def adapt_model(
     if len(dataset_shape_prefix) != 2:
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
 
-    if device is not None:
-        dataset = {
-            k: v.to(device)
-            for k, v in dataset.items()
-        }
-
     steps_count = dataset_shape_prefix[0]
 
     # Values to be adjusted by optimization
     params = init_zero_params(model.get_params(), device=device)
     torch_models = init_torch_models(model.get_torch_models(), device=device)
-    start_states = init_zero_params(model.get_state(), base_shape=dataset_shape_prefix, device=device)
+    start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
-    optimizer = Adam(
+    # print(tuple(tuple(torch_models.values())[0].parameters()))
+    optimizer = SGD(
         get_parameters(params, start_states, *torch_models.values()),
-        lr=1e-6, weight_decay=1e-9
+        lr=1e-3, weight_decay=1e-6
     )
 
     step = 0
-    loss: Tensor = tensor(1e9)
-    while float(loss) > target_loss:  # Training loop
-
+    while True:  # Training loop
         optimizer.zero_grad()
         state = start_states
         loss: Tensor = tensor(0)
@@ -75,21 +71,24 @@ def adapt_model(
             new_state, outputs = model.compute_step(params, torch_models, state, dataset_step)
             loss_step = loss_func(outputs, dataset_step)
             if step:
-                if loss_step > target_loss:
-                    break
                 loss += loss_step
+                if not (float(loss_step) < target_loss):
+                    break
             else:
                 loss = loss_step
 
             state = new_state
 
-        if loss < target_loss:
+        if float(loss) < target_loss:
             loss += (1. - sum(
-                v.mean(dim=0).sum() for v in state.values()
+                v.abs().mean(dim=0).sum() for v in state.values()
             )).abs()
 
         loss.backward()
         optimizer.step()
         print(f'{step + 1}/{steps_count} loss={float(loss)}')
+
+        if float(loss) < target_loss:
+            break
 
     return tuple(get_parameters(params, *torch_models))

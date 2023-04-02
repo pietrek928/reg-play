@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Tuple
 
 from torch import tensor, stack, float32
@@ -6,8 +7,8 @@ from named_tensor import NamedTensor
 
 
 def compute_dt(time: tensor):
-    dt = time - time.roll(shifts=-1, dims=-1)
-    dt[..., -1] = dt[..., :-1].mean(dim=-1)
+    dt = time - time.roll(shifts=-1, dims=0)
+    dt[-1, ...] = dt[:-1, ...].mean(dim=0)
     return dt
 
 
@@ -25,3 +26,22 @@ def sample_many(
     l = n // (count // 2)
     for start in range(0, n - l, l // 2):
         yield dataset.sample_sums(start, start + l, step, mean_axis=mean_axis)
+
+
+def compute_means(dataset: NamedTensor):
+    return {
+        k: float(v.mean())
+        for k, v in dataset.values().items()
+    }
+
+
+def l1_loss_func(means, outputs, gt):
+    return sum(
+        (outputs[k] - gt[k]).abs().mean() * (1. / abs(means[k]))
+        for k in outputs
+    )
+
+
+def l1_loss_normalized(dataset: NamedTensor):
+    means = compute_means(dataset)
+    return partial(l1_loss_func, means)

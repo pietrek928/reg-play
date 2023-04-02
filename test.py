@@ -3,12 +3,12 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
-from adapt import score_controller, fill_with_grad
-from dab import transform_sim_data
+from adapt import score_controller, fill_with_grad, adapt_model
+from dab import transform_sim_data, DABLowRef
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
 from read_file import CSVNumbersReader
-from utils import sample_many, prepare_dataset
+from utils import sample_many, prepare_dataset, l1_loss_normalized
 from vis import plot_controller_sym
 
 
@@ -191,4 +191,5 @@ data = transform_sim_data(
 dataset = prepare_dataset(
     tuple(sample_many(data, 400, 100, ('VS', 'd', 'I')))
 )
-print(dataset.tensor.shape)
+
+adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), 10., device='cuda:0')

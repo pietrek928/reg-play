@@ -1,6 +1,6 @@
 from typing import Tuple, Dict
 
-from torch import Tensor, cat, stack
+from torch import Tensor, cat
 from torch.nn import Sequential, Linear, SELU, Module
 
 from model import OutputValue, InputValue, Model, Values, StateValue, TorchModel
@@ -46,7 +46,7 @@ class DABLowRef(Model):
             cls, params: Values, torch_models: Dict[str, Module],
             state: Values, inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
-        model_out = torch_models['models'](
+        model_out = torch_models['model'](
             cat((state['state'], inputs['VS'], inputs['d'], inputs['dt']), dim=-1)
         )
         return dict(
@@ -60,17 +60,17 @@ class DABLowRef(Model):
 
 def transform_sim_data(sim_data: NamedTensor) -> NamedTensor:
     return NamedTensor.from_params(
-        dt=compute_dt(sim_data[..., 'Time']).unsqueeze(-1),
-        VS=sim_data[..., 'Vm1:Measured voltage'].unsqueeze(-1),
-        d=sim_data[..., 'Triangular Wave'].unsqueeze(-1),
+        dt=compute_dt(sim_data[..., 'Time']),
+        VS=sim_data[..., 'Vm1:Measured voltage'],
+        d=sim_data[..., 'Triangular Wave'],
 
-        PD=stack((
+        PD=cat((
             (sim_data[..., 'D3:Diode voltage'] * sim_data[..., 'D3:Diode current']).abs()
             + (sim_data[..., 'D4:Diode voltage'] * sim_data[..., 'D4:Diode current']).abs(),
             (sim_data[..., 'D1:Diode voltage'] * sim_data[..., 'D1:Diode current']).abs()
             + (sim_data[..., 'D7:Diode voltage'] * sim_data[..., 'D7:Diode current']).abs(),
         ), dim=-1),
-        I=stack((
+        I=cat((
             sim_data[..., 'Am1:Measured current'], sim_data[..., 'Am3:Measured current'],
         ), dim=-1),
     )
