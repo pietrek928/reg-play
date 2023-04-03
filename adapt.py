@@ -1,8 +1,9 @@
 from typing import Callable, Type
 
+from adabound import AdaBound
 from torch import Tensor, tensor
-from torch.optim import SGD
 
+from adaboundw import AdaBoundW
 from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
 from named_tensor import NamedTensor
@@ -53,9 +54,9 @@ def adapt_model(
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
     # print(tuple(tuple(torch_models.values())[0].parameters()))
-    optimizer = SGD(
+    optimizer = AdaBoundW(
         get_parameters(params, start_states, *torch_models.values()),
-        lr=1e-3, weight_decay=1e-6
+        lr=1e-3, weight_decay=1e-4
     )
 
     step = 0
@@ -79,10 +80,9 @@ def adapt_model(
 
             state = new_state
 
-        if float(loss) < target_loss:
-            loss += (1. - sum(
-                v.abs().mean(dim=0).sum() for v in state.values()
-            )).abs()
+        loss += (1. - sum(
+            v.abs().mean(dim=0).sum() for v in state.values()
+        )).abs() * .04
 
         loss.backward()
         optimizer.step()

@@ -185,11 +185,12 @@ def optimize():
 
 # plot_sym()
 r = CSVNumbersReader('/home/pietrek/Downloads/data.csv')
+r.read(1024)  # skip rows
 data = transform_sim_data(
     r.read(100000000000)
 )
 dataset = prepare_dataset(
-    tuple(sample_many(data, 400, 100, ('VS', 'd', 'I')))
+    tuple(sample_many(data, 100, 24, ('VS', 'd', 'I')))
 )
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), 10., device='cuda:0')
+adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .7, device='cuda:0')
