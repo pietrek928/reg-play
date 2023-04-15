@@ -1,12 +1,26 @@
 from typing import Callable, Type
 
+from adabound import AdaBound
 from torch import Tensor, tensor
-from torch.optim import AdamW, SGD
+from torch.optim import AdamW, SGD, Adam
 
+from adaboundw import AdaBoundW
 from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
 from named_tensor import NamedTensor
 from obj import Block, Tm
+
+
+def set_optimizer_params(optimizer, new_params):
+    for param_group in optimizer.param_groups:
+        param_group.update(new_params)
+
+
+def get_step_params(lr, step):
+    return dict(
+        lr=lr / step ** 1.2,
+        weight_decay=lr / step ** 1.2 * 5e-3,
+    )
 
 
 def score_controller(block: Block, controller: Block, fin: Callable, fscore: Callable, t: float, dt: float):
@@ -52,13 +66,16 @@ def adapt_model(
     torch_models = init_torch_models(model.get_torch_models(), device=device)
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
+    model_lr = 1e-4
+    start_states_lr = 1e-1
+
     optimizer_params = AdamW(
         get_parameters(params, *torch_models.values()),
-        lr=1e-2, weight_decay=1e-5
+        **get_step_params(model_lr, 1)
     )
     optimizer_start_states = SGD(
         get_parameters(start_states),
-        lr=1e-5, weight_decay=1e-8
+        **get_step_params(start_states_lr, 1)
     )
 
     step = 0
@@ -81,17 +98,20 @@ def adapt_model(
             else:
                 loss = loss_step
 
-        loss += (1. - sum(
-            v.abs().mean(dim=0).sum() for v in state.values()
-        )).abs() * .04
         # loss += (1. - sum(
-        #     v.abs().mean(dim=0).sum() for v in start_states.values()
+        #     v.abs().mean(dim=0).sum() for v in state.values()
         # )).abs() * .04
+        loss += (1. - sum(
+            v.abs().mean(dim=0).sum() for v in start_states.values()
+        )).abs() * .04
 
         loss.backward()
         optimizer_params.step()
         optimizer_start_states.step()
         print(f'{step + 1}/{steps_count} loss={float(loss)}')
+
+        set_optimizer_params(optimizer_params, get_step_params(model_lr, step))
+        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr, step))
 
         if float(loss) < target_loss and step + 1 == steps_count:
             break

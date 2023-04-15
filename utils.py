@@ -13,8 +13,16 @@ def compute_dt(time: tensor):
 
 
 def prepare_dataset(items: Tuple[NamedTensor]):
-    joined = stack([i.tensor for i in items], dim=0).to(dtype=float32)
+    joined = stack([i.tensor for i in items], dim=1).to(dtype=float32)
     return NamedTensor(joined, axis_descr=items[0].axis_descr)
+
+
+def plot_dataset(dataset: NamedTensor):
+    import matplotlib.pyplot as plt
+    for k, v in dataset.values().items():
+        plt.plot(v, label=k)
+    plt.legend()
+    plt.show()
 
 
 def sample_many(

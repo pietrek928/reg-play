@@ -1,7 +1,7 @@
 from typing import Tuple, Dict
 
 from torch import Tensor, cat
-from torch.nn import Sequential, Linear, SELU, Module, BatchNorm1d
+from torch.nn import Sequential, Linear, SELU, Module, BatchNorm1d, ReLU
 
 from model import OutputValue, InputValue, Model, Values, StateValue, TorchModel
 from named_tensor import NamedTensor
@@ -14,13 +14,15 @@ class DABLowRef(Model):
             super().__init__(*args, **kwargs)
 
             self.model = Sequential(
-                Linear(5, 32),
+                Linear(4, 16),
                 # BatchNorm1d(16),
-                # SELU(inplace=True),
-                # Linear(16, 32),
-                BatchNorm1d(32),
                 SELU(inplace=True),
-                Linear(32, 6),
+                Linear(16, 32),
+                # BatchNorm1d(32),
+                SELU(inplace=True),
+                # ReLU(inplace=True),
+                Linear(32, 5),
+                # Linear(4, 5),
             )
 
         def forward(self, x: Tensor):
@@ -38,7 +40,7 @@ class DABLowRef(Model):
     I = OutputValue(shape=(2,), descr='Both sides avg current')
 
     # State
-    state = StateValue(shape=(2,), descr='DAB internal state')
+    state = StateValue(shape=(1,), descr='DAB internal state')
 
     # Torch models
     model = TorchModel(model=Model, descr='Main model computing derivatives for integration')
@@ -53,7 +55,7 @@ class DABLowRef(Model):
         )
         return dict(
             # TODO: improve integration
-            state=state['state'] + model_out[..., 4:6] * inputs['dt']
+            state=state['state'] + model_out[..., 4:5] * inputs['dt']
         ), dict(
             PD=model_out[..., 0:2],
             I=model_out[..., 2:4],
