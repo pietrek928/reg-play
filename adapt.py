@@ -1,9 +1,8 @@
 from typing import Callable, Type
 
-from adabound import AdaBound
 from torch import Tensor, tensor
+from torch.optim import AdamW, SGD
 
-from adaboundw import AdaBoundW
 from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
 from named_tensor import NamedTensor
@@ -53,15 +52,19 @@ def adapt_model(
     torch_models = init_torch_models(model.get_torch_models(), device=device)
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
-    # print(tuple(tuple(torch_models.values())[0].parameters()))
-    optimizer = AdaBoundW(
-        get_parameters(params, start_states, *torch_models.values()),
-        lr=1e-3, weight_decay=1e-4
+    optimizer_params = AdamW(
+        get_parameters(params, *torch_models.values()),
+        lr=1e-2, weight_decay=1e-5
+    )
+    optimizer_start_states = SGD(
+        get_parameters(start_states),
+        lr=1e-5, weight_decay=1e-8
     )
 
     step = 0
     while True:  # Training loop
-        optimizer.zero_grad()
+        optimizer_params.zero_grad()
+        optimizer_start_states.zero_grad()
         state = start_states
         loss: Tensor = tensor(0)
 
@@ -69,26 +72,28 @@ def adapt_model(
             dataset_step = {
                 k: v[step] for k, v in dataset.items()
             }
-            new_state, outputs = model.compute_step(params, torch_models, state, dataset_step)
+            state, outputs = model.compute_step(params, torch_models, state, dataset_step)
             loss_step = loss_func(outputs, dataset_step)
             if step:
                 loss += loss_step
-                if not (float(loss_step) < target_loss):
+                if not (float(loss) < target_loss):
                     break
             else:
                 loss = loss_step
 
-            state = new_state
-
         loss += (1. - sum(
             v.abs().mean(dim=0).sum() for v in state.values()
         )).abs() * .04
+        # loss += (1. - sum(
+        #     v.abs().mean(dim=0).sum() for v in start_states.values()
+        # )).abs() * .04
 
         loss.backward()
-        optimizer.step()
+        optimizer_params.step()
+        optimizer_start_states.step()
         print(f'{step + 1}/{steps_count} loss={float(loss)}')
 
-        if float(loss) < target_loss:
+        if float(loss) < target_loss and step + 1 == steps_count:
             break
 
     return tuple(get_parameters(params, *torch_models))

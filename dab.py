@@ -1,7 +1,7 @@
 from typing import Tuple, Dict
 
 from torch import Tensor, cat
-from torch.nn import Sequential, Linear, SELU, Module, ReLU, BatchNorm1d
+from torch.nn import Sequential, Linear, SELU, Module, BatchNorm1d
 
 from model import OutputValue, InputValue, Model, Values, StateValue, TorchModel
 from named_tensor import NamedTensor
@@ -15,11 +15,12 @@ class DABLowRef(Model):
 
             self.model = Sequential(
                 Linear(5, 32),
+                # BatchNorm1d(16),
+                # SELU(inplace=True),
+                # Linear(16, 32),
                 BatchNorm1d(32),
                 SELU(inplace=True),
-                Linear(32, 64),
-                SELU(inplace=True),
-                Linear(64, 6),
+                Linear(32, 6),
             )
 
         def forward(self, x: Tensor):
@@ -52,10 +53,10 @@ class DABLowRef(Model):
         )
         return dict(
             # TODO: improve integration
-            state=state['state'] + model_out[..., :2] * inputs['dt']
+            state=state['state'] + model_out[..., 4:6] * inputs['dt']
         ), dict(
-            PD=model_out[..., 2:4],
-            I=model_out[..., 4:6],
+            PD=model_out[..., 0:2],
+            I=model_out[..., 2:4],
         )
 
 

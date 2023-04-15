@@ -190,7 +190,7 @@ data = transform_sim_data(
     r.read(100000000000)
 )
 dataset = prepare_dataset(
-    tuple(sample_many(data, 100, 24, ('VS', 'd', 'I')))
+    tuple(sample_many(data, 40, 24, ('VS', 'd', 'I')))
 )
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .7, device='cuda:0')
+adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), 2., device=None)
