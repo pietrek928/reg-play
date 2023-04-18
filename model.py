@@ -141,3 +141,15 @@ def validate_values(values_descr: ValuesDescr, values: Values):
             raise ValueError(f'Inconsistent shape prefix {prefix} != {current_prefix}')
 
     return prefix
+
+
+def detach_values(values: Values) -> Values:
+    return {
+        k: v.detach()
+        for k, v in values.items()
+    }
+
+
+def scale_values_grad(values: Values, scale: float):
+    for v in values.values():
+        v.grad *= scale

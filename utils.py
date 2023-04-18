@@ -2,6 +2,7 @@ from functools import partial
 from typing import Tuple
 
 from torch import tensor, stack, float32
+from torch.nn.functional import smooth_l1_loss
 
 from named_tensor import NamedTensor
 
@@ -53,3 +54,15 @@ def l1_loss_func(means, outputs, gt):
 def l1_loss_normalized(dataset: NamedTensor):
     means = compute_means(dataset)
     return partial(l1_loss_func, means)
+
+
+def l2_loss_func(means, outputs, gt):
+    return sum(
+        smooth_l1_loss(outputs[k] * (1. / abs(means[k])), gt[k] * (1. / abs(means[k])))
+        for k in outputs
+    )
+
+
+def l2_loss_normalized(dataset: NamedTensor):
+    means = compute_means(dataset)
+    return partial(l2_loss_func, means)

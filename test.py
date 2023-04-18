@@ -8,7 +8,7 @@ from dab import transform_sim_data, DABLowRef
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
 from read_file import CSVNumbersReader
-from utils import sample_many, prepare_dataset, l1_loss_normalized, plot_dataset
+from utils import sample_many, prepare_dataset, l2_loss_normalized
 from vis import plot_controller_sym
 
 
@@ -190,7 +190,7 @@ data = transform_sim_data(
     r.read(100000000000)
 )
 samples = tuple(sample_many(data, 2000, 52, ('VS', 'd', 'I')))
-# plot_dataset(samples[10])
+# plot_dataset(samples[100])
 dataset = prepare_dataset(samples)
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .4, device=None)
+adapt_model(DABLowRef, dataset, l2_loss_normalized(dataset), .025, device='cuda:0')

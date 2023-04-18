@@ -1,8 +1,7 @@
 from typing import Callable, Type
 
 from adabound import AdaBound
-from torch import Tensor, tensor
-from torch.optim import AdamW, SGD, Adam
+from torch.optim import AdamW, RMSprop, Adadelta, ASGD, Adam
 
 from adaboundw import AdaBoundW
 from grad import sum_vals, GradVar
@@ -16,10 +15,10 @@ def set_optimizer_params(optimizer, new_params):
         param_group.update(new_params)
 
 
-def get_step_params(lr, step):
+def get_step_params(lr):
     return dict(
-        lr=lr / step ** 1.2,
-        weight_decay=lr / step ** 1.2 * 5e-3,
+        lr=lr,
+        weight_decay=lr * 5e-3,
     )
 
 
@@ -66,16 +65,16 @@ def adapt_model(
     torch_models = init_torch_models(model.get_torch_models(), device=device)
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
-    model_lr = 1e-4
-    start_states_lr = 1e-1
+    model_lr = 4e-2
+    start_states_lr = 4e-3
 
-    optimizer_params = AdamW(
+    optimizer_params = Adam(
         get_parameters(params, *torch_models.values()),
-        **get_step_params(model_lr, 1)
+        **get_step_params(model_lr)
     )
-    optimizer_start_states = SGD(
+    optimizer_start_states = RMSprop(
         get_parameters(start_states),
-        **get_step_params(start_states_lr, 1)
+        **get_step_params(start_states_lr)
     )
 
     step = 0
@@ -83,13 +82,15 @@ def adapt_model(
         optimizer_params.zero_grad()
         optimizer_start_states.zero_grad()
         state = start_states
-        loss: Tensor = tensor(0)
+        loss = None
 
         for step in range(steps_count):  # Model simulation loop
             dataset_step = {
                 k: v[step] for k, v in dataset.items()
             }
             state, outputs = model.compute_step(params, torch_models, state, dataset_step)
+            # state = detach_values(state)  # ???????????
+            # scale_values_grad(state, 1e-1)
             loss_step = loss_func(outputs, dataset_step)
             if step:
                 loss += loss_step
@@ -101,19 +102,21 @@ def adapt_model(
         # loss += (1. - sum(
         #     v.abs().mean(dim=0).sum() for v in state.values()
         # )).abs() * .04
-        loss += (1. - sum(
-            v.abs().mean(dim=0).sum() for v in start_states.values()
-        )).abs() * .04
+        # loss += (1. - sum(
+        #     v.abs().mean(dim=0).sum() for v in start_states.values()
+        # )).abs() * .01
 
         loss.backward()
+        loss = float(loss)
         optimizer_params.step()
         optimizer_start_states.step()
-        print(f'{step + 1}/{steps_count} loss={float(loss)}')
+        print(f'{step + 1}/{steps_count} loss={loss}')
+        lr_scale = loss ** .7  # / (step + 1)
 
-        set_optimizer_params(optimizer_params, get_step_params(model_lr, step))
-        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr, step))
+        set_optimizer_params(optimizer_params, get_step_params(model_lr * lr_scale))
+        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * lr_scale))
 
-        if float(loss) < target_loss and step + 1 == steps_count:
+        if loss < target_loss and step + 1 == steps_count:
             break
 
     return tuple(get_parameters(params, *torch_models))
