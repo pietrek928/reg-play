@@ -1,7 +1,7 @@
 from typing import Tuple, Dict
 
 from torch import Tensor, cat
-from torch.nn import Sequential, Linear, SELU, Module, BatchNorm1d
+from torch.nn import Sequential, Linear, SELU, Module, BatchNorm1d, AlphaDropout
 
 from model import OutputValue, InputValue, Model, Values, StateValue, TorchModel
 from named_tensor import NamedTensor
@@ -14,16 +14,16 @@ class DABLowRef(Model):
             super().__init__(*args, **kwargs)
 
             self.model = Sequential(
-                Linear(4, 8),
-                BatchNorm1d(8),
-                SELU(inplace=True),
-                Linear(8, 16),
+                Linear(4, 16),
                 BatchNorm1d(16),
                 SELU(inplace=True),
-                # Linear(32, 32),
-                # BatchNorm1d(32),
-                # SELU(inplace=True),
-                Linear(16, 5),
+                Linear(16, 32),
+                BatchNorm1d(32),
+                SELU(inplace=True),
+                Linear(32, 32),
+                BatchNorm1d(32),
+                SELU(inplace=True),
+                Linear(32, 5),
                 # Linear(4, 5),
             )
 
