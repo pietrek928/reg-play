@@ -63,8 +63,8 @@ def adapt_model(
     torch_models = init_torch_models(model.get_torch_models(), device=device)
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
-    model_lr = 2e-2
-    start_states_lr = 2e-3
+    model_lr = 1e-2
+    start_states_lr = 1e-3
 
     optimizer_params = Adam(
         get_parameters(params, *torch_models.values()),
@@ -97,19 +97,20 @@ def adapt_model(
             else:
                 loss = loss_step
 
-        # loss += (1. - sum(
-        #     v.abs().mean(dim=0).sum() for v in start_states.values()
-        # )).abs() * .004
-        # loss += sum(
-        #     (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
-        # ).abs() * .004
+        loss += (1. - sum(
+            v.abs().mean(dim=0).sum() for v in start_states.values()
+        )).abs() * .004
+        loss += sum(
+            (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
+        ).abs() * .004
 
         loss.backward()
-        loss = float(loss)
         optimizer_params.step()
         optimizer_start_states.step()
+
+        loss = float(loss)
         print(f'{step + 1}/{steps_count} loss={loss}')
-        lr_scale = loss ** .5  # / (step + 1)
+        lr_scale = loss ** 1.5  # / (step + 1)
 
         set_optimizer_params(optimizer_params, get_step_params(model_lr * lr_scale))
         set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * lr_scale))

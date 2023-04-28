@@ -193,4 +193,4 @@ samples = tuple(sample_many(data, 2000, 52, ('VS', 'd', 'I')))
 # plot_dataset(samples[100])
 dataset = prepare_dataset(samples)
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device='cuda:0')
+adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .25, device='cpu')
