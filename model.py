@@ -104,11 +104,12 @@ def init_zero_params(
 
 
 def init_torch_models(
-        models_descr: TorchModelsDescr, device=None
+        models_descr: TorchModelsDescr, device=None, train=False,
 ) -> Dict[str, Module]:
     models = {}
     for k, m in models_descr.items():
         mm = m.model(**m.params)
+        mm.train(train)
         if device is not None:
             mm.to(device)
         models[k] = mm

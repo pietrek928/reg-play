@@ -1,6 +1,6 @@
 from typing import Callable, Type
 
-from torch.optim import RMSprop, Adam
+from torch.optim import RMSprop, Adamax, ASGD, AdamW, Rprop
 
 from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
@@ -60,13 +60,15 @@ def adapt_model(
 
     # Values to be adjusted by optimization
     params = init_zero_params(model.get_params(), device=device)
-    torch_models = init_torch_models(model.get_torch_models(), device=device)
+    torch_models = init_torch_models(model.get_torch_models(), device=device, train=True)
     start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
-    model_lr = 1e-2
-    start_states_lr = 1e-3
+    model_lr = 1e-3
+    start_states_lr = 4e-3
 
-    optimizer_params = Adam(
+    # AdamW ?
+    # Adamax +
+    optimizer_params = AdamW(
         get_parameters(params, *torch_models.values()),
         **get_step_params(model_lr)
     )
@@ -92,17 +94,17 @@ def adapt_model(
             loss_step = loss_func(outputs, dataset_step)
             if step:
                 loss += loss_step
-                if not (float(loss) < target_loss):
+                if not (float(loss) < target_loss * 5.):
                     break
             else:
                 loss = loss_step
 
-        loss += (1. - sum(
-            v.abs().mean(dim=0).sum() for v in start_states.values()
-        )).abs() * .004
-        loss += sum(
-            (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
-        ).abs() * .004
+        # loss += (1. - sum(
+        #     v.abs().mean(dim=0).sum() for v in start_states.values()
+        # )).abs() * .004
+        # loss += sum(
+        #     (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
+        # ).abs() * .004
 
         loss.backward()
         optimizer_params.step()
@@ -110,10 +112,9 @@ def adapt_model(
 
         loss = float(loss)
         print(f'{step + 1}/{steps_count} loss={loss}')
-        lr_scale = loss ** 1.5  # / (step + 1)
 
-        set_optimizer_params(optimizer_params, get_step_params(model_lr * lr_scale))
-        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * lr_scale))
+        set_optimizer_params(optimizer_params, get_step_params(model_lr * loss / (step + 1) ** 1.9))
+        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * loss / (step + 1) ** 2.3))
 
         if loss < target_loss and step + 1 == steps_count:
             break

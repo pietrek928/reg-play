@@ -1,10 +1,32 @@
 from functools import partial
-from typing import Tuple
+from typing import Tuple, Dict
 
-from torch import tensor, stack, float32
+from torch import tensor, stack, float32, save, load
 from torch.nn.functional import smooth_l1_loss
 
 from named_tensor import NamedTensor
+
+
+def save_models_state(fname, models: Dict):
+    state = {
+        k: v.state_dict()
+        for k, v in models.items()
+    }
+    save(state, fname)
+
+
+def load_models_state(fname, models: Dict):
+    state = load(fname)
+    for n, m in models.items():
+        if n in state:
+            m.load_state_dict(state[n])
+
+
+def default_device():
+    from torch import cuda
+    if cuda.device_count():
+        return 'cuda:0'
+    return 'cpu'
 
 
 def compute_dt(time: tensor):

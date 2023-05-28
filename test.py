@@ -2,13 +2,14 @@ from typing import Any
 
 import numpy as np
 from pydantic import BaseModel
+from torch import cuda
 
 from adapt import score_controller, fill_with_grad, adapt_model
 from dab import transform_sim_data, DABLowRef
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
 from read_file import CSVNumbersReader
-from utils import sample_many, prepare_dataset, l1_loss_normalized
+from utils import sample_many, prepare_dataset, l1_loss_normalized, default_device
 from vis import plot_controller_sym
 
 
@@ -193,4 +194,4 @@ samples = tuple(sample_many(data, 2000, 52, ('VS', 'd', 'I')))
 # plot_dataset(samples[100])
 dataset = prepare_dataset(samples)
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .25, device='cpu')
+adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())

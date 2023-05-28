@@ -1,11 +1,42 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Type
 
 from torch import Tensor, cat
-from torch.nn import Sequential, Linear, Module, BatchNorm1d, ReLU, SELU
+from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU
 
 from model import OutputValue, InputValue, Model, Values, StateValue, TorchModel
 from named_tensor import NamedTensor
 from utils import compute_dt
+
+
+class ResidualSequential(Sequential):
+    @property
+    def creates_layer(self):
+        return any(
+            m.creates_layer for m in self
+        )
+
+    def forward(self, input: Tensor) -> Tensor:
+        for block in self:
+            input = input + block(input)
+        return input
+
+
+class LinearBlock(Module):
+    def __init__(
+            self, in_features, out_features,
+            activation_cls: Type[Module] = SELU,
+            normalize=True,
+    ):
+        super().__init__()
+        layers = []
+        layers.append(Linear(in_features, out_features))
+        if normalize:
+            layers.append(BatchNorm1d(out_features))
+        layers.append(activation_cls(inplace=True))
+        self.net = Sequential(*layers)
+
+    def forward(self, input: Tensor) -> Tensor:
+        return self.net.forward(input)
 
 
 class DABLowRef(Model):
@@ -14,17 +45,22 @@ class DABLowRef(Model):
             super().__init__(*args, **kwargs)
 
             self.model = Sequential(
-                Linear(4, 16),
-                BatchNorm1d(16),
-                ReLU(inplace=True),
-                Linear(16, 16),
-                BatchNorm1d(16),
-                SELU(inplace=True),
-                Linear(16, 16),
-                BatchNorm1d(16),
-                ReLU(inplace=True),
-                Linear(16, 5),
+                LinearBlock(4, 64),
+                LinearBlock(64, 64),
+
+                ResidualSequential(
+                    LinearBlock(64, 64),
+                    LinearBlock(64, 64),
+                    LinearBlock(64, 64),
+                    LinearBlock(64, 64),
+                ),
+                LinearBlock(64, 64),
+                Linear(64, 5),
+
                 # Linear(4, 5),
+                # BatchNorm1d(5),
+                # SELU(inplace=True),
+                # Linear(5, 5),
             )
 
         def forward(self, x: Tensor):
@@ -57,7 +93,8 @@ class DABLowRef(Model):
         )
         return dict(
             # TODO: improve integration
-            state=state['state'] + model_out[..., 4:5] * inputs['dt']
+            # state=state['state'] + model_out[..., 4:5] * inputs['dt']
+            state=model_out[..., 4:5]
         ), dict(
             PD=model_out[..., 0:2],
             I=model_out[..., 2:4],
