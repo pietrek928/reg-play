@@ -44,6 +44,8 @@ class OutputValue(ValueDescr):
 
 # TODO: add submodels ?
 class Model:
+    history_size: int = 1
+
     @classmethod
     def get_inputs(cls) -> ValuesDescr:
         return {
@@ -82,7 +84,7 @@ class Model:
     @classmethod
     def compute_step(
             cls, params: Values, torch_models: Dict[str, Module],
-            state: Values, inputs: Values
+            inputs: Tuple[Values, ...], outputs: Tuple[Values, ...]
     ) -> Tuple[Values, Values]:  # new_state, outputs
         raise NotImplementedError('compute_step not implemented')
 

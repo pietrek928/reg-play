@@ -1,6 +1,6 @@
 from typing import Callable, Type
 
-from torch.optim import RMSprop, Adamax, ASGD, AdamW, Rprop
+from torch.optim import Adamax
 
 from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
@@ -16,7 +16,7 @@ def set_optimizer_params(optimizer, new_params):
 def get_step_params(lr):
     return dict(
         lr=lr,
-        weight_decay=lr * 5e-3,
+        weight_decay=lr * 1e-3,
     )
 
 
@@ -61,62 +61,97 @@ def adapt_model(
     # Values to be adjusted by optimization
     params = init_zero_params(model.get_params(), device=device)
     torch_models = init_torch_models(model.get_torch_models(), device=device, train=True)
-    start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
+    # start_states = init_zero_params(model.get_state(), base_shape=(dataset_shape_prefix[1],), device=device)
 
     model_lr = 1e-3
-    start_states_lr = 4e-3
+    # start_states_lr = 4e-3
 
     # AdamW ?
     # Adamax +
-    optimizer_params = AdamW(
+    optimizer_params = Adamax(
         get_parameters(params, *torch_models.values()),
         **get_step_params(model_lr)
     )
-    optimizer_start_states = RMSprop(
-        get_parameters(start_states),
-        **get_step_params(start_states_lr)
-    )
+    # optimizer_start_states = RMSprop(
+    #     get_parameters(start_states),
+    #     **get_step_params(start_states_lr)
+    # )
 
-    step = 0
-    while True:  # Training loop
-        optimizer_params.zero_grad()
-        optimizer_start_states.zero_grad()
-        state = start_states
-        loss = None
+    history_size = model.history_size
 
-        for step in range(steps_count):  # Model simulation loop
-            dataset_step = {
-                k: v[step] for k, v in dataset.items()
-            }
-            state, outputs = model.compute_step(params, torch_models, state, dataset_step)
-            # state = detach_values(state)  # ???????????
-            # scale_values_grad(state, 1e-1)
-            loss_step = loss_func(outputs, dataset_step)
-            if step:
-                loss += loss_step
-                if not (float(loss) < target_loss * 5.):
-                    break
-            else:
-                loss = loss_step
+    # step = 0
+    try:
+        while True:  # Training loop
+            optimizer_params.zero_grad()
+            # optimizer_start_states.zero_grad()
+            # state = start_states
+            loss = None
 
-        # loss += (1. - sum(
-        #     v.abs().mean(dim=0).sum() for v in start_states.values()
-        # )).abs() * .004
-        # loss += sum(
-        #     (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
-        # ).abs() * .004
+            dataset_steps = tuple(
+                {
+                    k: v[step] for k, v in dataset.items()
+                } for step in range(history_size)
+            )
 
-        loss.backward()
-        optimizer_params.step()
-        optimizer_start_states.step()
+            for step in range(history_size - 1, steps_count):  # Model simulation loop
+                dataset_steps = dataset_steps[1:] + ({
+                                                         k: v[step] for k, v in dataset.items()
+                                                     },)
+                state, outputs = model.compute_step(params, torch_models, dataset_steps, dataset_steps[:-1])
+                # state = detach_values(state)  # ???????????
+                # scale_values_grad(state, 1e-1)
+                if loss is None:
+                    loss = loss_func(outputs, dataset_steps[-1])
+                else:
+                    loss += loss_func(outputs, dataset_steps[-1])
+                # if step:
+                #     loss += loss_step
+                #     if not (float(loss) < target_loss * 5.):
+                #         break
+                # else:
+                #     loss = loss_step
 
-        loss = float(loss)
-        print(f'{step + 1}/{steps_count} loss={loss}')
+            # loss += (1. - sum(
+            #     v.abs().mean(dim=0).sum() for v in start_states.values()
+            # )).abs() * .004
+            # loss += sum(
+            #     (v - v.roll(1, dims=0)).abs().mean(dim=0).sum() for v in start_states.values()
+            # ).abs() * .004
 
-        set_optimizer_params(optimizer_params, get_step_params(model_lr * loss / (step + 1) ** 1.9))
-        set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * loss / (step + 1) ** 2.3))
+            loss.backward()
+            optimizer_params.step()
+            # optimizer_start_states.step()
 
-        if loss < target_loss and step + 1 == steps_count:
-            break
+            loss = float(loss)
+            # print(f'{step + 1}/{steps_count} loss={loss}')
+            print(f'loss={loss}')
 
-    return tuple(get_parameters(params, *torch_models))
+            set_optimizer_params(optimizer_params, get_step_params(model_lr * loss))
+            # set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * loss / (step + 1) ** 2.3))
+
+            # if loss < target_loss and step + 1 == steps_count:
+            if loss < target_loss:
+                break
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        return tuple(get_parameters(params, *torch_models))
+
+def sim_model(model: Type[Model], torch_models, input_data, start_outputs, steps_count):
+    history_size = model.history_size
+
+    inputs_descr = model.get_inputs()
+    outputs_descr = model.get_outputs()
+
+    input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
+    output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
+    # if len(dataset_shape_prefix) != 2:
+    #     raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+
+    for step in range(steps_count):
+        input_data = input_data[1:] + ({
+                                                 k: v[step] for k, v in dataset.items()
+                                             },)
+
