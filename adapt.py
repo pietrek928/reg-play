@@ -139,19 +139,43 @@ def adapt_model(
     finally:
         return tuple(get_parameters(params, *torch_models))
 
-def sim_model(model: Type[Model], torch_models, input_data, start_outputs, steps_count):
+
+def run_model_sim(model: Model, torch_models, input_data, steps_count):
     history_size = model.history_size
 
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
 
     input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
-    output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
+    # output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
     # if len(dataset_shape_prefix) != 2:
     #     raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
 
-    for step in range(steps_count):
-        input_data = input_data[1:] + ({
-                                                 k: v[step] for k, v in dataset.items()
-                                             },)
+    model_inputs = tuple(
+        {
+            k: v[step] for k, v in input_data.items()
+        } for step in range(history_size)
+    )
 
+    model_states = tuple(
+        {
+            init_zero_params(model.get_state())
+        } for _ in range(history_size)
+    )
+    model_outputs = tuple(
+        {
+            init_zero_params(outputs_descr)
+        } for _ in range(history_size - 1)
+    )
+
+    for step in range(steps_count):
+        model_inputs = model_inputs[1:] + (
+            {
+                k: v[step] for k, v in input_data.items()
+            },
+        )
+
+        state, outputs = model.compute_step({}, torch_models, model_inputs, model_outputs)
+
+        model_states = model_states[1:] + (state,)
+        model_outputs = model_outputs[1:] + (outputs,)
