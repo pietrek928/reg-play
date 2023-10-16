@@ -244,49 +244,48 @@ class TestDABReg(Model):
         )
 
 
-def u_step_sin_case(n, f, uinrms, fin, uout, t_step):
+def u_step_sin_case(n, f, vinrms, fin, vout, t_step):
     import numpy as np
-    UIN = (uinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
+    VIN = (vinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
 
-    UOUT = np.zeros(n)
+    VOUT = np.zeros(n)
     nt = int(t_step * f)
     it = nt
     while it < n:
-        UOUT[it:it + nt] = uout
+        VOUT[it:it + nt] = vout
         it += 2 * nt
 
-    return dict(UIN=UIN, UOUT=UOUT, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT=VOUT, f=np.ones(n) * f)
 
 
-def u_const_dc_step_case(n, f, uin, uout, t_step):
+def u_const_dc_step_case(n, f, vin, vout, t_step):
     import numpy as np
-    UIN = np.zeros(n)
+    VIN = np.zeros(n)
     nt = int(t_step * f)
     it = nt
     while it < n:
-        UIN[it:it + nt] = uin
+        VIN[it:it + nt] = vin
         it += 2 * nt
 
-    UOUT = np.ones(n) * uout
+    VOUT = np.ones(n) * vout
 
-    return dict(UIN=UIN, UOUT=UOUT, f=np.ones(n) * f)
+    return dict(UIN=VIN, UOUT=VOUT, f=np.ones(n) * f)
 
 
 def u_sin_sin_case(n, f, uinrms, fin, uoutrms, fout):
     import numpy as np
-    UIN = (uinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
-    UOUT = (uoutrms * np.sqrt(2)) * np.sin((2 * np.pi * fout / f) * np.arange(n))
+    VIN = (uinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
+    VOUT = (uoutrms * np.sqrt(2)) * np.sin((2 * np.pi * fout / f) * np.arange(n))
 
-    return dict(UIN=UIN, UOUT=UOUT, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT=VOUT, f=np.ones(n) * f)
 
 
-def union_cases(cases):
+def union_cases(cases, keys):
     import numpy as np
-    return dict(
-        UIN=np.concatenate([c['UIN'] for c in cases], axis=-1)[..., np.newaxis],
-        UOUT=np.concatenate([c['UOUT'] for c in cases], axis=-1)[..., np.newaxis],
-        f=np.concatenate([c['f'] for c in cases], axis=-1)[..., np.newaxis],
-    )
+    return {
+        k: np.concatenate([c[k] for c in cases], axis=-1)[..., np.newaxis]
+        for k in keys
+    }
 
 
 def prepare_test_cases(n):
@@ -318,4 +317,39 @@ def prepare_test_cases(n):
             cases.append(u_const_dc_step_case(n, f, uin, uout, t_step))
             cases.append(u_sin_sin_case(n, f, uin, fin, uout, fout))
 
-    return union_cases(cases)
+    return union_cases(cases, ('VIN', 'VOUT', 'f'))
+
+
+def make_random_steps(n, tmin, tmax):
+    import numpy as np
+
+    v = np.zeros(n, dtype=np.float32)
+    it = 0
+    while it < n:
+        t = int(np.random.uniform(tmin, tmax))
+        v[it:it + t] = 1
+        it += t
+
+        it += int(np.random.uniform(tmin, tmax))
+
+    return v
+
+
+# prepare output resistance and capacitance
+def prepare_out_params(n):
+    import numpy as np
+
+    steps_min_period = 1000
+    steps_max_period = 10000
+    r_min = 1
+    r_max = 10
+    c_min = 1e-5
+    c_max = 1e-4
+
+    cases = []
+    for _ in range(100):
+        cases.append(dict(
+            R=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, r_max - r_min) + r_min,
+            C=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, c_max - c_min) + c_min,
+        ))
+    return union_cases(cases, ('R', 'C'))

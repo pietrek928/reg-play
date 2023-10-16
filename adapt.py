@@ -140,6 +140,33 @@ def adapt_model(
         return tuple(get_parameters(params, *torch_models))
 
 
+def compute_dab_rc_step(dab_model: Model, reg_model: Model, torch_models, inputs, outputs):
+    vout = outputs[-1]['VOUT']
+    dab_state, dab_outputs = dab_model.compute_step(
+        {}, torch_models,
+        ({
+             'VIN': inputs[-1]['VIN'],
+             'VOUT': vout,
+             'f': inputs[-1]['f'],
+             'fi': inputs[-1]['fi'],
+         },),
+        outputs
+    )
+
+    iin = dab_outputs['iin']
+    iout = dab_outputs['iout']
+    e = vout - inputs[-1]['VIN_set']
+
+    reg_state, reg_outputs = reg_model.compute_step(
+        {}, torch_models, inputs, outputs
+    )
+
+    ic = iout - vout / inputs[-1]['R']
+    vout += ic / inputs[-1]['C'] * inputs[-1]['dt']
+
+    return reg_state, reg_outputs
+
+
 def run_model_sim(model: Model, torch_models, input_data, steps_count):
     history_size = model.history_size
 

@@ -185,13 +185,17 @@ def optimize():
 
 
 # plot_sym()
-r = CSVNumbersReader('/home/pietrek/Downloads/data.csv')
-r.read(1024)  # skip rows
-data = transform_sim_data(
-    r.read(100000000000)
-)
-samples = tuple(sample_many(data, 2000, 52, ('VS', 'd', 'I')))
-# plot_dataset(samples[100])
-dataset = prepare_dataset(samples)
+# r = CSVNumbersReader('/home/pietrek/Downloads/data.csv')
+# r.read(1024)  # skip rows
+# data = transform_sim_data(
+#     r.read(100000000000)
+# )
+# samples = tuple(sample_many(data, 2000, 52, ('VS', 'd', 'I')))
+# # plot_dataset(samples[100])
+# dataset = prepare_dataset(samples)
+#
+# adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())
 
-adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())
+def optimize_test_dab():
+    # Model with simple RC on output
+    pass
