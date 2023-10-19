@@ -167,11 +167,11 @@ def compute_dab_rc_step(dab_model: Model, reg_model: Model, torch_models, inputs
     return reg_state, reg_outputs
 
 
-def run_model_sim(model: Model, torch_models, input_data, steps_count):
-    history_size = model.history_size
+def run_dac_rc_sim(dab_model: Model, reg_model: Model, torch_models, input_data, steps_count):
+    history_size = dab_model.history_size
 
-    inputs_descr = model.get_inputs()
-    outputs_descr = model.get_outputs()
+    inputs_descr = dab_model.get_inputs() | reg_model.get_inputs()
+    outputs_descr = dab_model.get_outputs() | reg_model.get_outputs()
 
     input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
     # output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
@@ -186,7 +186,7 @@ def run_model_sim(model: Model, torch_models, input_data, steps_count):
 
     model_states = tuple(
         {
-            init_zero_params(model.get_state())
+            init_zero_params(reg_model.get_state())
         } for _ in range(history_size)
     )
     model_outputs = tuple(
@@ -202,7 +202,9 @@ def run_model_sim(model: Model, torch_models, input_data, steps_count):
             },
         )
 
-        state, outputs = model.compute_step({}, torch_models, model_inputs, model_outputs)
+        state, outputs = compute_dab_rc_step(
+            dab_model, reg_model, torch_models, model_inputs, model_outputs
+        )
 
         model_states = model_states[1:] + (state,)
         model_outputs = model_outputs[1:] + (outputs,)
