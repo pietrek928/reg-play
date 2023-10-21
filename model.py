@@ -83,8 +83,7 @@ class Model:
 
     @classmethod
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module],
-            inputs: Tuple[Values, ...], outputs: Tuple[Values, ...]
+            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
         raise NotImplementedError('compute_step not implemented')
 

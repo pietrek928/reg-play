@@ -1,9 +1,11 @@
 from functools import partial
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any, List
 
-from torch import tensor, stack, float32, save, load
+import numpy as np
+from torch import tensor, stack, float32, save, load, Tensor, from_numpy
 from torch.nn.functional import smooth_l1_loss
 
+from model import Values
 from named_tensor import NamedTensor
 
 
@@ -20,6 +22,31 @@ def load_models_state(fname, models: Dict):
     for n, m in models.items():
         if n in state:
             m.load_state_dict(state[n])
+
+
+def values_to(
+        values: Dict[str, Any], dtype=float32, device=None
+) -> Values:
+    return {
+        k: (
+            v if isinstance(v, Tensor) else from_numpy(v)
+        ).to(dtype=dtype, device=device)
+        for k, v in values.items()
+    }
+
+
+def stack_values(values: List[Values], axis: int = 0):
+    return {
+        k: stack([v[k] for v in values], dim=axis)
+        for k in values[0]
+    }
+
+
+def stack_values_np(values: List[Dict[str, np.ndarray]], axis: int = 0):
+    return {
+        k: np.stack([v[k] for v in values], axis=axis)
+        for k in values[0]
+    }
 
 
 def default_device():

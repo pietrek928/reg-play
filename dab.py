@@ -5,7 +5,7 @@ from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, AlphaDropout
 
 from model import OutputValue, InputValue, Model, Values, TorchModel, ParamValue, StateValue
 from named_tensor import NamedTensor
-from utils import compute_dt
+from utils import compute_dt, stack_values_np
 
 
 class ResidualSequential(Sequential):
@@ -150,9 +150,10 @@ def transform_sim_data(sim_data: NamedTensor) -> NamedTensor:
 
 
 class DABLowSimple(Model):
-    history_size = 0
+    # history_size = 0
 
     # Parameters
+    # TODO: inputs ? consts ?
     Leq = ParamValue(descr='Equivalent inductance[H]')
     nt = ParamValue(descr='Transformer turns ratio')
 
@@ -168,20 +169,18 @@ class DABLowSimple(Model):
 
     @classmethod
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module],
-            inputs: Tuple[Values, ...], outputs: Tuple[Values, ...]
+            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
-        in_vals = inputs[-1]
-
-        k = in_vals['fi'] * (1. - 2. * in_vals['fi'].abs()) / (in_vals['f'] * params['Leq'])
+        # TODO: fi - clamp with penalty
+        k = inputs['fi'] * (1. - 2. * inputs['fi'].abs()) / (inputs['f'] * params['Leq'])
         return dict(), dict(
-            IIN=in_vals['VOUT'] * k,
-            IOUT=in_vals['VIN'] * params['nt'] * k,
+            IIN=inputs['VOUT'] * k,
+            IOUT=inputs['VIN'] * params['nt'] * k,
         )
 
 
 class TestDABReg(Model):
-    history_size = 2
+    # history_size = 2
 
     class Model(Module):
         def __init__(self, *args, **kwargs):
@@ -223,8 +222,7 @@ class TestDABReg(Model):
 
     @classmethod
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module],
-            inputs: Tuple[Values, ...], outputs: Tuple[Values, ...]
+            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
         model_out = torch_models['model'](
             assemble_inputs(
@@ -235,13 +233,36 @@ class TestDABReg(Model):
         )
 
         fi_v = model_out[..., 0:1]
-        fi_I = inputs[-1]['fi_I'] + model_out[..., 1:2]
+        fi_I = inputs['fi_I'] + model_out[..., 1:2]
         return dict(
             fi_I=fi_I,
             state=model_out[..., 2:],
         ), dict(
             fi=(fi_v + fi_I).tanh() * .5,
         )
+
+
+class DABRCModel(Model):
+    @classmethod
+    def compute_step(
+            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
+    ) -> Tuple[Values, Values]:  # new_state, outputs
+        dab_state, dab_outputs = DABLowSimple.compute_step(
+            {}, torch_models, inputs
+        )
+
+        reg_state, reg_outputs = TestDABReg.compute_step(
+            {}, torch_models, inputs
+        )
+
+        vout = inputs['VOUT']
+        iout = dab_outputs['iout']
+        ic = iout - vout / inputs['R']
+        vout += ic / inputs['C'] * inputs['dt']
+
+        return reg_state | dict(
+            VOUT=vout,
+        ), reg_outputs
 
 
 def u_step_sin_case(n, f, vinrms, fin, vout, t_step):
@@ -280,14 +301,6 @@ def u_sin_sin_case(n, f, uinrms, fin, uoutrms, fout):
     return dict(VIN=VIN, VOUT=VOUT, f=np.ones(n) * f)
 
 
-def union_cases(cases, keys):
-    import numpy as np
-    return {
-        k: np.concatenate([c[k] for c in cases], axis=-1)[..., np.newaxis]
-        for k in keys
-    }
-
-
 def prepare_test_cases(n):
     import numpy as np
 
@@ -317,7 +330,7 @@ def prepare_test_cases(n):
             cases.append(u_const_dc_step_case(n, f, uin, uout, t_step))
             cases.append(u_sin_sin_case(n, f, uin, fin, uout, fout))
 
-    return union_cases(cases, ('VIN', 'VOUT', 'f'))
+    return stack_values_np(cases)
 
 
 def make_random_steps(n, tmin, tmax):
@@ -352,4 +365,4 @@ def prepare_out_params(n):
             R=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, r_max - r_min) + r_min,
             C=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, c_max - c_min) + c_min,
         ))
-    return union_cases(cases, ('R', 'C'))
+    return stack_values_np(cases)

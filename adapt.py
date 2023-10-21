@@ -1,4 +1,4 @@
-from typing import Callable, Type
+from typing import Callable, Type, Dict, Any
 
 from torch.optim import Adamax
 
@@ -6,6 +6,7 @@ from grad import sum_vals, GradVar
 from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
 from named_tensor import NamedTensor
 from obj import Block, Tm
+from utils import values_to, stack_values
 
 
 def set_optimizer_params(optimizer, new_params):
@@ -140,71 +141,76 @@ def adapt_model(
         return tuple(get_parameters(params, *torch_models))
 
 
-def compute_dab_rc_step(dab_model: Model, reg_model: Model, torch_models, inputs, outputs):
-    vout = outputs[-1]['VOUT']
-    dab_state, dab_outputs = dab_model.compute_step(
-        {}, torch_models,
-        ({
-             'VIN': inputs[-1]['VIN'],
-             'VOUT': vout,
-             'f': inputs[-1]['f'],
-             'fi': inputs[-1]['fi'],
-         },),
-        outputs
-    )
+def run_dab_rc_sim(
+        test_model: Model, torch_models, input_data, steps_count
+):
+    # inputs_descr = dab_model.get_inputs() | reg_model.get_inputs()
+    # outputs_descr = dab_model.get_outputs() | reg_model.get_outputs()
 
-    iin = dab_outputs['iin']
-    iout = dab_outputs['iout']
-    e = vout - inputs[-1]['VIN_set']
-
-    reg_state, reg_outputs = reg_model.compute_step(
-        {}, torch_models, inputs, outputs
-    )
-
-    ic = iout - vout / inputs[-1]['R']
-    vout += ic / inputs[-1]['C'] * inputs[-1]['dt']
-
-    return reg_state, reg_outputs
-
-
-def run_dac_rc_sim(dab_model: Model, reg_model: Model, torch_models, input_data, steps_count):
-    history_size = dab_model.history_size
-
-    inputs_descr = dab_model.get_inputs() | reg_model.get_inputs()
-    outputs_descr = dab_model.get_outputs() | reg_model.get_outputs()
-
-    input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
+    # input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
     # output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
     # if len(dataset_shape_prefix) != 2:
     #     raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+    output_history = []
 
-    model_inputs = tuple(
-        {
-            k: v[step] for k, v in input_data.items()
-        } for step in range(history_size)
-    )
-
-    model_states = tuple(
-        {
-            init_zero_params(reg_model.get_state())
-        } for _ in range(history_size)
-    )
-    model_outputs = tuple(
-        {
-            init_zero_params(outputs_descr)
-        } for _ in range(history_size - 1)
-    )
+    model_state = init_zero_params(test_model.get_state())
 
     for step in range(steps_count):
-        model_inputs = model_inputs[1:] + (
-            {
-                k: v[step] for k, v in input_data.items()
-            },
-        )
+        model_inputs = {
+            k: v[step] for k, v in input_data.items()
+        }
 
-        state, outputs = compute_dab_rc_step(
-            dab_model, reg_model, torch_models, model_inputs, model_outputs
+        model_state, outputs = test_model.compute_step(
+            {}, torch_models, model_inputs | model_state
         )
+        output_history.append(outputs)
 
-        model_states = model_states[1:] + (state,)
-        model_outputs = model_outputs[1:] + (outputs,)
+    return stack_values(output_history)
+
+
+def adapt_rc_dab_reg(
+        test_model: Model, dataset: Dict[str, Any], loss_func,
+        target_loss: float, device=None
+):
+    dataset = values_to(dataset, device=device)
+
+    inputs_descr = test_model.get_inputs()
+    outputs_descr = test_model.get_outputs()
+
+    dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
+    if len(dataset_shape_prefix) != 2:
+        raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+
+    steps_count = dataset_shape_prefix[0]
+
+    torch_models = init_torch_models(test_model.get_torch_models(), device=device, train=True)
+
+    model_lr = 1e-3
+    # start_states_lr = 4e-3
+
+    # AdamW ?
+    # Adamax +
+    optimizer_params = Adamax(
+        get_parameters(*torch_models.values()),
+        **get_step_params(model_lr)
+    )
+
+    while True:  # Training loop
+        optimizer_params.zero_grad()
+
+        outputs = run_dab_rc_sim(test_model, torch_models, dataset, steps_count)
+
+        loss = loss_func(outputs, dataset)
+
+        loss.backward()
+        optimizer_params.step()
+
+        loss = float(loss)
+        # print(f'{step + 1}/{steps_count} loss={loss}')
+        print(f'loss={loss}')
+
+        set_optimizer_params(optimizer_params, get_step_params(model_lr * loss))
+
+        # if loss < target_loss and step + 1 == steps_count:
+        if loss < target_loss:
+            break
