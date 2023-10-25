@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Type, Any
+from typing import Tuple, Dict, Type, Any, Union
 
 from pydantic import BaseModel
 from torch import float32, dtype, zeros, Tensor
@@ -23,14 +23,12 @@ class TorchModel(BaseModel):
 
 TorchModelsDescr = Dict[str, TorchModel]
 Values = Dict[str, Tensor]
+ValuesRec = Dict[str, Union[Tensor, 'ValuesRec']]
 ValuesDescr = Dict[str, ValueDescr]
+ValuesDescrRec = Dict[str, Union[ValueDescr, 'ValuesDescrRec']]
 
 
 class InputValue(ValueDescr):
-    pass
-
-
-class ParamValue(ValueDescr):
     pass
 
 
@@ -42,65 +40,67 @@ class OutputValue(ValueDescr):
     pass
 
 
-# TODO: add submodels ?
-class Model:
-    history_size: int = 1
-
-    @classmethod
-    def get_inputs(cls) -> ValuesDescr:
+class SymBlock(Module):
+    def extract_attrs(self, parent_cls):
         return {
-            k: v for k, v in vars(cls).items()
-            if isinstance(v, InputValue)
+            k: getattr(self, k) for k in dir(self)
+            if not k.startswith('_') and isinstance(getattr(self, k), parent_cls)
         }
 
-    @classmethod
-    def get_outputs(cls) -> ValuesDescr:
-        return {
-            k: v for k, v in vars(cls).items()
-            if isinstance(v, OutputValue)
-        }
+    def get_inputs(self) -> ValuesDescr:
+        return self.extract_attrs(InputValue)
 
-    @classmethod
-    def get_params(cls) -> ValuesDescr:
-        return {
-            k: v for k, v in vars(cls).items()
-            if isinstance(v, ParamValue)
-        }
+    def get_outputs(self) -> ValuesDescr:
+        return self.extract_attrs(OutputValue)
 
-    @classmethod
-    def get_state(cls) -> ValuesDescr:
-        return {
-            k: v for k, v in vars(cls).items()
-            if isinstance(v, StateValue)
-        }
+    def get_state(self) -> ValuesDescrRec:
+        states = self.extract_attrs(StateValue)
+        for name, submodel in self.extract_attrs(SymBlock).items():
+            if isinstance(submodel, SymBlock):
+                states[name] = submodel.get_state()
+        return states
 
-    @classmethod
-    def get_torch_models(cls) -> TorchModelsDescr:
-        return {
-            k: v for k, v in vars(cls).items()
-            if isinstance(v, TorchModel)
-        }
-
-    @classmethod
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
-    ) -> Tuple[Values, Values]:  # new_state, outputs
+            self, inputs: ValuesRec
+    ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
         raise NotImplementedError('compute_step not implemented')
 
 
-def init_zero_params(
-        values: ValuesDescr,
+def init_zero_values(
+        values: ValuesDescrRec,
         base_shape: Tuple[int, ...] = (),
         device=None,
 ) -> Values:
     tensors = {}
     for k, v in dict(values).items():
-        shape = base_shape + v.shape
-        if not shape:
-            shape = (1,)
-        tensors[k] = Parameter(
-            data=zeros(*shape, dtype=v.type, device=device)
-        )
+        if isinstance(v, dict):
+            tensors[k] = init_zero_values(v, base_shape, device)
+        else:
+            shape = v.shape
+            if not shape:
+                shape = (1,)
+            shape = base_shape + shape
+            tensors[k] = zeros(*shape, dtype=v.type, device=device)
+    return tensors
+
+
+def init_zero_params(
+        values: ValuesDescrRec,
+        base_shape: Tuple[int, ...] = (),
+        device=None,
+) -> ValuesRec:
+    tensors = {}
+    for k, v in dict(values).items():
+        if isinstance(v, dict):
+            tensors[k] = init_zero_params(v, base_shape, device)
+        else:
+            shape = v.shape
+            if not shape:
+                shape = (1,)
+            shape = base_shape + shape
+            tensors[k] = Parameter(
+                data=zeros(*shape, dtype=v.type, device=device)
+            )
     return tensors
 
 

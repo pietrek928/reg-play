@@ -3,7 +3,7 @@ from typing import Tuple, Dict, Type
 from torch import Tensor, cat
 from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, AlphaDropout
 
-from model import OutputValue, InputValue, Model, Values, TorchModel, ParamValue, StateValue
+from model import OutputValue, InputValue, Values, TorchModel, StateValue, SymBlock, ValuesRec, ValuesDescr
 from named_tensor import NamedTensor
 from utils import compute_dt, stack_values_np
 
@@ -40,22 +40,18 @@ class LinearBlock(Module):
 
 
 def assemble_inputs(
-        history_size: int,
-        inputs: Tuple[Values, ...], input_keys: Tuple[str, ...],
-        outputs: Tuple[Values, ...], output_keys: Tuple[str, ...],
+        inputs: Values, keys: Tuple[str, ...],
 ) -> Tensor:
-    items = []
-    for it in range(history_size - 1):
-        for k in input_keys:
-            items.append(inputs[-it - 1][k])
-        for k in output_keys:
-            items.append(outputs[-it][k])
-    for k in input_keys:
-        items.append(inputs[-1][k])
-    return cat(items, dim=-1)
+    try:
+        return cat([
+            inputs[k] for k in keys
+        ], dim=-1)
+    except RuntimeError as e:
+        shapes = {k: inputs[k].shape for k in keys}
+        raise RuntimeError(f'Failed to assemble inputs with shapes: {shapes}') from e
 
 
-class DABLowRef(Model):
+class DABLowRef(SymBlock):
     history_size = 2
 
     class Model(Module):
@@ -149,13 +145,10 @@ def transform_sim_data(sim_data: NamedTensor) -> NamedTensor:
     )
 
 
-class DABLowSimple(Model):
-    # history_size = 0
-
+class DABLowSimple(SymBlock):
     # Parameters
-    # TODO: inputs ? consts ?
-    Leq = ParamValue(descr='Equivalent inductance[H]')
-    nt = ParamValue(descr='Transformer turns ratio')
+    Leq = InputValue(descr='Equivalent inductance[H]')
+    nt = InputValue(descr='Transformer turns ratio')
 
     # Inputs
     VIN = InputValue(descr='Input voltage[V]')
@@ -167,44 +160,19 @@ class DABLowSimple(Model):
     IIN = OutputValue(descr='Input current[A]')
     IOUT = OutputValue(descr='Output current[A]')
 
-    @classmethod
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
+            self, inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
-        # TODO: fi - clamp with penalty
-        k = inputs['fi'] * (1. - 2. * inputs['fi'].abs()) / (inputs['f'] * params['Leq'])
+        # TODO: fi - clamp with penalty ??? tanh ???
+        fi = inputs['fi']
+        k = fi * (1. - 2. * fi.abs()) / (inputs['f'] * inputs['Leq'])
         return dict(), dict(
             IIN=inputs['VOUT'] * k,
-            IOUT=inputs['VIN'] * params['nt'] * k,
+            IOUT=inputs['VIN'] * inputs['nt'] * k,
         )
 
 
-class TestDABReg(Model):
-    # history_size = 2
-
-    class Model(Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-            n = 256
-
-            self.model = Sequential(
-                LinearBlock(30, 64),
-                AlphaDropout(0.1),
-                LinearBlock(64, n),
-                ResidualSequential(
-                    LinearBlock(n, n),
-                    LinearBlock(n, n),
-                    LinearBlock(n, n),
-                    LinearBlock(n, n),
-                ),
-                LinearBlock(n, 64),
-                Linear(64, 6),
-            )
-
-        def forward(self, x: Tensor):
-            return self.model(x)
-
+class TestDABReg(SymBlock):
     # Inputs
     VIN = InputValue(descr='Input voltage[V]')
     e = InputValue(descr='Difference from set value')
@@ -214,22 +182,33 @@ class TestDABReg(Model):
     fi = OutputValue(shape=(1,), descr='Switching phase shift[Rad]')
 
     # State
-    fi_I = OutputValue(shape=(1,), descr='Switching phase shift[Rad] - integrated')
-    state = StateValue(shape=(4,), descr='DAB regulator internal state')
+    fi_I = StateValue(shape=(1,), descr='Switching phase shift[Rad] - integrated')
+    state = StateValue(shape=(16,), descr='DAB regulator internal state')
 
-    # Torch models
-    model = TorchModel(model=Model, descr='Main model computing regulator')
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-    @classmethod
+        n = 256
+
+        self.model = Sequential(
+            LinearBlock(20, 64),
+            AlphaDropout(0.1),
+            LinearBlock(64, n),
+            ResidualSequential(
+                LinearBlock(n, n),
+                LinearBlock(n, n),
+                LinearBlock(n, n),
+                LinearBlock(n, n),
+            ),
+            LinearBlock(n, 64),
+            Linear(64, 18),
+        )
+
     def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
-    ) -> Tuple[Values, Values]:  # new_state, outputs
-        model_out = torch_models['model'](
-            assemble_inputs(
-                cls.history_size,
-                inputs, ('VIN', 'e', 'f', 'fi_I', 'state'),
-                outputs, ('fi',),
-            )
+            self, inputs: ValuesRec
+    ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
+        model_out = self.model.forward(
+            assemble_inputs(inputs, ('VIN', 'e', 'f', 'fi_I', 'state'))
         )
 
         fi_v = model_out[..., 0:1]
@@ -242,41 +221,69 @@ class TestDABReg(Model):
         )
 
 
-class DABRCModel(Model):
-    @classmethod
-    def compute_step(
-            cls, params: Values, torch_models: Dict[str, Module], inputs: Values
-    ) -> Tuple[Values, Values]:  # new_state, outputs
-        dab_state, dab_outputs = DABLowSimple.compute_step(
-            {}, torch_models, inputs
+class DABRCModel(SymBlock):
+    R = InputValue(descr='Load resistance[Ohm]')
+    C = InputValue(descr='Load capacitance[F]')
+    VOUT_set = InputValue(descr='target output voltage value[V]')
+
+    VOUT = StateValue(descr='Output capacitor voltage[V]')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.dab_model = DABLowSimple()
+        self.reg_model = TestDABReg()
+
+    def get_inputs(self) -> ValuesDescr:
+        return super().get_inputs() | dict(
+            Leq=self.dab_model.Leq,
+            nt=self.dab_model.nt,
+            VIN=self.dab_model.VIN,
+            f=self.dab_model.f,
         )
 
-        reg_state, reg_outputs = TestDABReg.compute_step(
-            {}, torch_models, inputs
+    def compute_step(
+            self, inputs: ValuesRec
+    ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
+        reg_state, reg_outputs = self.reg_model.compute_step(
+            inputs | inputs['reg_model'] | dict(
+                e=inputs['VOUT_set'] - inputs['VOUT'],
+            )
+        )
+
+        dab_state, dab_outputs = self.dab_model.compute_step(
+            inputs | dict(
+                fi=reg_outputs['fi'],
+                Leq=1e-5, nt=8.,
+            )
         )
 
         vout = inputs['VOUT']
-        iout = dab_outputs['iout']
+        iout = dab_outputs['IOUT']
         ic = iout - vout / inputs['R']
-        vout += ic / inputs['C'] * inputs['dt']
+        vout += ic / (inputs['C'] * inputs['f'])
 
-        return reg_state | dict(
+        return dict(
+            reg_model=reg_state
+        ) | dict(
             VOUT=vout,
-        ), reg_outputs
+        ), reg_outputs | dict(
+            VOUT=vout,
+        )
 
 
 def u_step_sin_case(n, f, vinrms, fin, vout, t_step):
     import numpy as np
     VIN = (vinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
 
-    VOUT = np.zeros(n)
+    VOUT_set = np.zeros(n)
     nt = int(t_step * f)
     it = nt
     while it < n:
-        VOUT[it:it + nt] = vout
+        VOUT_set[it:it + nt] = vout
         it += 2 * nt
 
-    return dict(VIN=VIN, VOUT=VOUT, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
 
 
 def u_const_dc_step_case(n, f, vin, vout, t_step):
@@ -288,17 +295,17 @@ def u_const_dc_step_case(n, f, vin, vout, t_step):
         VIN[it:it + nt] = vin
         it += 2 * nt
 
-    VOUT = np.ones(n) * vout
+    VOUT_set = np.ones(n) * vout
 
-    return dict(UIN=VIN, UOUT=VOUT, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
 
 
 def u_sin_sin_case(n, f, uinrms, fin, uoutrms, fout):
     import numpy as np
     VIN = (uinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
-    VOUT = (uoutrms * np.sqrt(2)) * np.sin((2 * np.pi * fout / f) * np.arange(n))
+    VOUT_set = (uoutrms * np.sqrt(2)) * np.sin((2 * np.pi * fout / f) * np.arange(n))
 
-    return dict(VIN=VIN, VOUT=VOUT, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
 
 
 def prepare_test_cases(n):
@@ -318,8 +325,8 @@ def prepare_test_cases(n):
     t_step_max = .5
 
     cases = []
-    for f in np.linspace(f_min, f_max + 1e-6, 1000):
-        for _ in range(100):
+    for f in np.linspace(f_min, f_max + 1e-6, 100):
+        for _ in range(10):
             uin = np.random.uniform(uin_min, uin_max)
             uout = np.random.uniform(uout_min, uout_max)
             fin = np.random.uniform(fin_min, fin_max)
@@ -330,7 +337,7 @@ def prepare_test_cases(n):
             cases.append(u_const_dc_step_case(n, f, uin, uout, t_step))
             cases.append(u_sin_sin_case(n, f, uin, fin, uout, fout))
 
-    return stack_values_np(cases)
+    return stack_values_np(cases, axis=-2, append_dim=True)
 
 
 def make_random_steps(n, tmin, tmax):
@@ -360,9 +367,9 @@ def prepare_out_params(n):
     c_max = 1e-4
 
     cases = []
-    for _ in range(100):
+    for _ in range(3000):
         cases.append(dict(
             R=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, r_max - r_min) + r_min,
             C=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, c_max - c_min) + c_min,
         ))
-    return stack_values_np(cases)
+    return stack_values_np(cases, axis=-2, append_dim=True)

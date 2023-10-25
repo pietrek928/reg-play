@@ -1,12 +1,12 @@
-from typing import Callable, Type, Dict, Any
+from typing import Callable, Dict, Any
 
 from torch.optim import Adamax
 
 from grad import sum_vals, GradVar
-from model import Model, validate_values, init_zero_params, init_torch_models, get_parameters
+from model import validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
 from named_tensor import NamedTensor
 from obj import Block, Tm
-from utils import values_to, stack_values
+from utils import values_to, stack_values, merge_values
 
 
 def set_optimizer_params(optimizer, new_params):
@@ -45,7 +45,7 @@ def fill_with_grad(m: Tm) -> Tm:
 
 
 def adapt_model(
-        model: Type[Model], dataset: NamedTensor, loss_func,
+        model: SymBlock, dataset: NamedTensor, loss_func,
         target_loss: float, device=None
 ):
     dataset = dataset.values(device=device)
@@ -142,7 +142,7 @@ def adapt_model(
 
 
 def run_dab_rc_sim(
-        test_model: Model, torch_models, input_data, steps_count
+        model: SymBlock, input_data, steps_count, shape_prefix, device
 ):
     # inputs_descr = dab_model.get_inputs() | reg_model.get_inputs()
     # outputs_descr = dab_model.get_outputs() | reg_model.get_outputs()
@@ -153,15 +153,15 @@ def run_dab_rc_sim(
     #     raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
     output_history = []
 
-    model_state = init_zero_params(test_model.get_state())
+    model_state = init_zero_values(model.get_state(), base_shape=shape_prefix[1:], device=device)
 
     for step in range(steps_count):
         model_inputs = {
             k: v[step] for k, v in input_data.items()
         }
 
-        model_state, outputs = test_model.compute_step(
-            {}, torch_models, model_inputs | model_state
+        model_state, outputs = model.compute_step(
+            merge_values(model_inputs, model_state)
         )
         output_history.append(outputs)
 
@@ -169,48 +169,45 @@ def run_dab_rc_sim(
 
 
 def adapt_rc_dab_reg(
-        test_model: Model, dataset: Dict[str, Any], loss_func,
+        model: SymBlock, dataset: Dict[str, Any], loss_func,
         target_loss: float, device=None
 ):
+    model.to(device)
     dataset = values_to(dataset, device=device)
 
-    inputs_descr = test_model.get_inputs()
-    outputs_descr = test_model.get_outputs()
+    inputs_descr = model.get_inputs()
+    outputs_descr = model.get_outputs()
 
     dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
     if len(dataset_shape_prefix) != 2:
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
 
-    steps_count = dataset_shape_prefix[0]
-
-    torch_models = init_torch_models(test_model.get_torch_models(), device=device, train=True)
+    target_steps_count = dataset_shape_prefix[0]
+    steps_count = 1
 
     model_lr = 1e-3
-    # start_states_lr = 4e-3
 
     # AdamW ?
     # Adamax +
-    optimizer_params = Adamax(
-        get_parameters(*torch_models.values()),
-        **get_step_params(model_lr)
-    )
+    optimizer_params = Adamax(model.parameters())
 
     while True:  # Training loop
         optimizer_params.zero_grad()
 
-        outputs = run_dab_rc_sim(test_model, torch_models, dataset, steps_count)
+        outputs = run_dab_rc_sim(model, dataset, steps_count, dataset_shape_prefix, device)
 
-        loss = loss_func(outputs, dataset)
+        loss = loss_func(outputs, dataset, steps_count)
 
         loss.backward()
         optimizer_params.step()
 
         loss = float(loss)
-        # print(f'{step + 1}/{steps_count} loss={loss}')
-        print(f'loss={loss}')
+        print(f'{steps_count + 1}/{target_steps_count} loss={loss}')
 
         set_optimizer_params(optimizer_params, get_step_params(model_lr * loss))
 
-        # if loss < target_loss and step + 1 == steps_count:
         if loss < target_loss:
-            break
+            if steps_count < target_steps_count:
+                steps_count += 1
+            else:
+                break

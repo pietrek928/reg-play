@@ -2,14 +2,12 @@ from typing import Any
 
 import numpy as np
 from pydantic import BaseModel
-from torch import cuda
 
-from adapt import score_controller, fill_with_grad, adapt_model, adapt_rc_dab_reg
-from dab import transform_sim_data, DABLowRef, prepare_test_cases, prepare_out_params, DABRCModel
+from adapt import score_controller, fill_with_grad, adapt_rc_dab_reg
+from dab import prepare_test_cases, prepare_out_params, DABRCModel
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
-from read_file import CSVNumbersReader
-from utils import sample_many, prepare_dataset, l1_loss_normalized, default_device
+from utils import default_device
 from vis import plot_controller_sym
 
 
@@ -196,7 +194,16 @@ def optimize():
 #
 # adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())
 
+def dab_rc_loss_func(outputs, inputs, steps_count):
+    return (
+            outputs['VOUT'][:steps_count] - inputs['VOUT_set'][:steps_count]
+    ).abs().mean()
+
+
 def optimize_test_dab():
     n = 4096
     model_input = prepare_test_cases(n) | prepare_out_params(n)
-    adapt_rc_dab_reg(DABRCModel(), model_input)
+    adapt_rc_dab_reg(DABRCModel(), model_input, dab_rc_loss_func, .05, device=default_device())
+
+
+optimize_test_dab()

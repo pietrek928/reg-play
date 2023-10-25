@@ -1,4 +1,5 @@
 from functools import partial
+from itertools import chain
 from typing import Tuple, Dict, Any, List
 
 import numpy as np
@@ -42,9 +43,34 @@ def stack_values(values: List[Values], axis: int = 0):
     }
 
 
-def stack_values_np(values: List[Dict[str, np.ndarray]], axis: int = 0):
+def merge_values(*values: Dict):
+    r = {}
+    all_keys = set(
+        chain.from_iterable(v.keys() for v in values)
+    )
+    for k in all_keys:
+        key_values = [v[k] for v in values if k in v and v[k] is not None]
+        if len(key_values) == 0:
+            continue
+
+        if all(isinstance(v, dict) for v in key_values):
+            r[k] = merge_values(*key_values)
+        elif all(not isinstance(v, dict) for v in key_values):
+            r[k] = key_values[-1]
+        else:
+            raise ValueError(f'Cannot merge values for key {k}')
+    return r
+
+
+def stack_values_np(
+        values: List[Dict[str, np.ndarray]],
+        axis: int = 0, append_dim=False
+):
     return {
-        k: np.stack([v[k] for v in values], axis=axis)
+        k: np.stack([
+            v[k] if not append_dim else v[k][..., np.newaxis]
+            for v in values
+        ], axis=axis)
         for k in values[0]
     }
 
