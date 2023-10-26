@@ -1,6 +1,7 @@
+from random import randint, uniform
 from typing import Callable, Dict, Any
 
-from torch.optim import Adamax
+from torch.optim import Adamax, SGD, Adam, ASGD
 
 from grad import sum_vals, GradVar
 from model import validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
@@ -14,7 +15,8 @@ def set_optimizer_params(optimizer, new_params):
         param_group.update(new_params)
 
 
-def get_step_params(lr):
+def get_step_params(lr, step):
+    lr /= step
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -173,6 +175,7 @@ def adapt_rc_dab_reg(
         target_loss: float, device=None
 ):
     model.to(device)
+    model.train()
     dataset = values_to(dataset, device=device)
 
     inputs_descr = model.get_inputs()
@@ -183,14 +186,17 @@ def adapt_rc_dab_reg(
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
 
     target_steps_count = dataset_shape_prefix[0]
-    steps_count = 1
+    steps_count = 5
 
-    model_lr = 1e-3
+    model_lr = 4e-5
 
     # AdamW ?
     # Adamax +
-    optimizer_params = Adamax(model.parameters())
+    optimizer_params = SGD(model.parameters(), **get_step_params(model_lr, steps_count))
 
+    last_max_loss = 0.
+    last_mean_loss = 0.
+    max_stuck_count = 0
     while True:  # Training loop
         optimizer_params.zero_grad()
 
@@ -198,16 +204,39 @@ def adapt_rc_dab_reg(
 
         loss = loss_func(outputs, dataset, steps_count)
 
-        loss.backward()
-        optimizer_params.step()
+        loss_mean = loss.mean()
+        loss_max = loss.max()
 
-        loss = float(loss)
-        print(f'{steps_count + 1}/{target_steps_count} loss={loss}')
+        (loss_max * uniform(.03, .1) + loss_mean).backward()
+        loss_mean = float(loss_mean)
+        loss_max = float(loss_max)
+        if abs(loss_max - last_max_loss) < 1e-6:
+            max_stuck_count += 1
+        else:
+            max_stuck_count = 0
+        bad_loss = not (
+            abs(loss_mean) < 1e4
+            and abs(loss_max) < 1e5
+            and max_stuck_count < 3
+        )
+        last_max_loss = loss_max
+        last_mean_loss = loss_mean
 
-        set_optimizer_params(optimizer_params, get_step_params(model_lr * loss))
+        if not bad_loss:
+            optimizer_params.step()
+            set_optimizer_params(optimizer_params, get_step_params(model_lr, steps_count))
 
-        if loss < target_loss:
+        print(f'{steps_count + 1}/{target_steps_count} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+
+        if loss_mean < target_loss and not bad_loss:
             if steps_count < target_steps_count:
                 steps_count += 1
+            else:
+                break
+        elif bad_loss:
+            if steps_count > 2:
+                steps_count -= randint(1, 2)
+            elif steps_count > 1:
+                steps_count -= 1
             else:
                 break

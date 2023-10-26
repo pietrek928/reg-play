@@ -1,7 +1,7 @@
 from typing import Tuple, Dict, Type
 
 from torch import Tensor, cat
-from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, AlphaDropout
+from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, GELU, ELU, Sigmoid, AlphaDropout, LSTM
 
 from model import OutputValue, InputValue, Values, TorchModel, StateValue, SymBlock, ValuesRec, ValuesDescr
 from named_tensor import NamedTensor
@@ -32,7 +32,10 @@ class LinearBlock(Module):
         layers.append(Linear(in_features, out_features))
         if normalize:
             layers.append(BatchNorm1d(out_features))
-        layers.append(activation_cls(inplace=True))
+        try:
+            layers.append(activation_cls(inplace=True))
+        except TypeError:
+            layers.append(activation_cls())
         self.net = Sequential(*layers)
 
     def forward(self, input: Tensor) -> Tensor:
@@ -163,12 +166,11 @@ class DABLowSimple(SymBlock):
     def compute_step(
             self, inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
-        # TODO: fi - clamp with penalty ??? tanh ???
         fi = inputs['fi']
         k = fi * (1. - 2. * fi.abs()) / (inputs['f'] * inputs['Leq'])
         return dict(), dict(
             IIN=inputs['VOUT'] * k,
-            IOUT=inputs['VIN'] * inputs['nt'] * k,
+            IOUT=inputs['VIN'].abs() * inputs['nt'] * k,
         )
 
 
@@ -182,17 +184,20 @@ class TestDABReg(SymBlock):
     fi = OutputValue(shape=(1,), descr='Switching phase shift[Rad]')
 
     # State
-    fi_I = StateValue(shape=(1,), descr='Switching phase shift[Rad] - integrated')
-    state = StateValue(shape=(16,), descr='DAB regulator internal state')
+    e_I = StateValue(shape=(1,), descr='Difference from set value - integrated')
+    # state = StateValue(shape=(16,), descr='DAB regulator internal state')
+    lstm_state_1 = StateValue(shape=(2, 20), descr='DAB regulator internal state')
+    lstm_state_2 = StateValue(shape=(2, 20), descr='DAB regulator internal state')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        n = 256
+        n = 64
 
+        self.lstm = LSTM(4, 20, num_layers=2, batch_first=True)
         self.model = Sequential(
             LinearBlock(20, 64),
-            AlphaDropout(0.1),
+            AlphaDropout(0.04),
             LinearBlock(64, n),
             ResidualSequential(
                 LinearBlock(n, n),
@@ -200,24 +205,36 @@ class TestDABReg(SymBlock):
                 LinearBlock(n, n),
                 LinearBlock(n, n),
             ),
-            LinearBlock(n, 64),
-            Linear(64, 18),
+            # AlphaDropout(0.04),
+            LinearBlock(n, n),
+            Linear(n, 2),
         )
 
     def compute_step(
             self, inputs: ValuesRec
     ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
-        model_out = self.model.forward(
-            assemble_inputs(inputs, ('VIN', 'e', 'f', 'fi_I', 'state'))
-        )
+        e_I = (inputs['e_I'] + inputs['e'] / inputs['f']).tanh()
+        # e_I = inputs['e_I']
+        new_state = {}
+
+        lstm_in = assemble_inputs(
+            inputs | dict(
+                e_I=e_I,
+            ), ('VIN', 'e', 'e_I', 'f')
+        ).unsqueeze(-2)  # 1 lstm layer
+        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, (
+            inputs['lstm_state_1'].transpose(0, 1),  # batch as second dim
+            inputs['lstm_state_2'].transpose(0, 1)
+        ))
+        model_out = self.model.forward(lstm_out.squeeze(-2))
 
         fi_v = model_out[..., 0:1]
-        fi_I = inputs['fi_I'] + model_out[..., 1:2]
         return dict(
-            fi_I=fi_I,
-            state=model_out[..., 2:],
+            e_I=e_I,
+            lstm_state_1=lstm_state_1.transpose(0, 1),
+            lstm_state_2=lstm_state_2.transpose(0, 1),
         ), dict(
-            fi=(fi_v + fi_I).tanh() * .5,
+            fi=fi_v.tanh() * .5,
         )
 
 

@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 from pydantic import BaseModel
+from torch import Tensor
 
 from adapt import score_controller, fill_with_grad, adapt_rc_dab_reg
 from dab import prepare_test_cases, prepare_out_params, DABRCModel
@@ -194,16 +195,30 @@ def optimize():
 #
 # adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())
 
-def dab_rc_loss_func(outputs, inputs, steps_count):
-    return (
-            outputs['VOUT'][:steps_count] - inputs['VOUT_set'][:steps_count]
-    ).abs().mean()
+
+def dab_rc_loss_func(outputs: Tensor, inputs, steps_count):
+    from torch import linspace
+
+    device = outputs['VOUT'].device
+    loss_weights = linspace(.1, 1., steps_count, device=device) ** 1.5
+    values = (
+            (outputs['VOUT'][:steps_count] - inputs['VOUT_set'][:steps_count]) * loss_weights
+    ).abs()
+
+    # values[~values.isfinite() | (values > 1e3)] = 0.
+
+    # smaller gradient for clamped values
+    # values = values.clamp(max=1e3)
+    # return (clamped + (values - clamped) * .001).mean()
+    return values
 
 
 def optimize_test_dab():
     n = 4096
     model_input = prepare_test_cases(n) | prepare_out_params(n)
-    adapt_rc_dab_reg(DABRCModel(), model_input, dab_rc_loss_func, .05, device=default_device())
+    for k, v in model_input.items():
+        print(k, tuple(v[it].mean() for it in range(50)))
+    adapt_rc_dab_reg(DABRCModel(), model_input, dab_rc_loss_func, 20., device=default_device())
 
 
 optimize_test_dab()
