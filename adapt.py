@@ -1,13 +1,14 @@
 from random import randint, uniform
 from typing import Callable, Dict, Any
 
-from torch.optim import Adamax, SGD, Adam, ASGD
+from torch.optim import Adamax, SGD, Adam, AdamW, ASGD
+from torch.nn.utils import clip_grad_norm_, clip_grad_value_
 
 from grad import sum_vals, GradVar
-from model import validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
+from model import ValuesRec, validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
 from named_tensor import NamedTensor
 from obj import Block, Tm
-from utils import values_to, stack_values, merge_values
+from utils import detach_values, get_at_pos, get_range, set_range, values_to, stack_values, merge_values
 
 
 def set_optimizer_params(optimizer, new_params):
@@ -144,39 +145,32 @@ def adapt_model(
 
 
 def run_dab_rc_sim(
-        model: SymBlock, input_data, steps_count, shape_prefix, device
+        model: SymBlock, input_data: ValuesRec, model_state: ValuesRec
 ):
-    # inputs_descr = dab_model.get_inputs() | reg_model.get_inputs()
-    # outputs_descr = dab_model.get_outputs() | reg_model.get_outputs()
-
-    # input_dataset_shape_prefix = validate_values(inputs_descr, input_data)
-    # output_dataset_shape_prefix = validate_values(outputs_descr, start_outputs)
-    # if len(dataset_shape_prefix) != 2:
-    #     raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
     output_history = []
+    state_history = []
 
-    model_state = init_zero_values(model.get_state(), base_shape=shape_prefix[1:], device=device)
-
+    steps_count = input_data[next(iter(input_data.keys()))].shape[0]
     for step in range(steps_count):
-        model_inputs = {
-            k: v[step] for k, v in input_data.items()
-        }
+        model_inputs = get_at_pos(input_data, step)
 
         model_state, outputs = model.compute_step(
             merge_values(model_inputs, model_state)
         )
+        state_history.append(model_state)
         output_history.append(outputs)
 
-    return stack_values(output_history)
+    return stack_values(state_history), stack_values(output_history)
 
 
 def adapt_rc_dab_reg(
-        model: SymBlock, dataset: Dict[str, Any], loss_func,
-        target_loss: float, device=None
+        model: SymBlock, dataset: Dict[str, Any], init_state, loss_func,
+        target_steps_count, target_loss: float, device=None
 ):
     model.to(device)
     model.train()
     dataset = values_to(dataset, device=device)
+    init_state = values_to(init_state, device=device)
 
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
@@ -184,15 +178,21 @@ def adapt_rc_dab_reg(
     dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
     if len(dataset_shape_prefix) != 2:
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+    
+    model_states = init_zero_values(
+        model.get_state(), base_shape=dataset_shape_prefix, device=device
+    )
+    model_states = merge_values(model_states, init_state)
 
-    target_steps_count = dataset_shape_prefix[0]
-    steps_count = 5
+    steps_count = 2
 
-    model_lr = 4e-5
+    model_lr = 1e-5
 
     # AdamW ?
     # Adamax +
-    optimizer_params = SGD(model.parameters(), **get_step_params(model_lr, steps_count))
+    optimizer_params = ASGD(model.parameters(), **get_step_params(model_lr, steps_count))
+
+    start_pos = 0
 
     last_max_loss = 0.
     last_mean_loss = 0.
@@ -200,14 +200,23 @@ def adapt_rc_dab_reg(
     while True:  # Training loop
         optimizer_params.zero_grad()
 
-        outputs = run_dab_rc_sim(model, dataset, steps_count, dataset_shape_prefix, device)
+        start = 1024
+        # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
+        # start = start_pos
+        end = start + steps_count
+        model_inputs = get_range(dataset, start, end)
 
-        loss = loss_func(outputs, dataset, steps_count)
+        new_states, outputs = run_dab_rc_sim(
+            # FIXME: why detach needed ???
+            model, model_inputs, detach_values(get_at_pos(model_states, start))
+        )
+
+        loss = loss_func(outputs, model_inputs)
 
         loss_mean = loss.mean()
         loss_max = loss.max()
 
-        (loss_max * uniform(.03, .1) + loss_mean).backward()
+        (loss_max * uniform(.01, .05) + loss_mean).backward()
         loss_mean = float(loss_mean)
         loss_max = float(loss_max)
         if abs(loss_max - last_max_loss) < 1e-6:
@@ -216,27 +225,35 @@ def adapt_rc_dab_reg(
             max_stuck_count = 0
         bad_loss = not (
             abs(loss_mean) < 1e4
-            and abs(loss_max) < 1e5
-            and max_stuck_count < 3
+            and abs(loss_max) < 1e7
+            and max_stuck_count < 15
         )
         last_max_loss = loss_max
         last_mean_loss = loss_mean
 
-        if not bad_loss:
+        # clip_grad_norm_(model.parameters(), clip_value=1.0)
+        # clip_grad_value_(model.parameters(), clip_value=1.0)
+        if not bad_loss or steps_count < 5:
+            # set_range(model_states, start+1, detach_values(new_states))
             optimizer_params.step()
             set_optimizer_params(optimizer_params, get_step_params(model_lr, steps_count))
 
-        print(f'{steps_count + 1}/{target_steps_count} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+        print(f'{steps_count + 1}/{dataset_shape_prefix[0]} stert_pos={start} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+
+        # start_pos += steps_count
+        # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
+        #     start_pos = 0
 
         if loss_mean < target_loss and not bad_loss:
             if steps_count < target_steps_count:
+                # steps_count += randint(0, 10) // 8
                 steps_count += 1
-            else:
-                break
+            # else:
+            #     break
         elif bad_loss:
             if steps_count > 2:
                 steps_count -= randint(1, 2)
             elif steps_count > 1:
                 steps_count -= 1
-            else:
-                break
+            # else:
+                # break

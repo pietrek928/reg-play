@@ -167,10 +167,10 @@ class DABLowSimple(SymBlock):
             self, inputs: Values
     ) -> Tuple[Values, Values]:  # new_state, outputs
         fi = inputs['fi']
-        k = fi * (1. - 2. * fi.abs()) / (inputs['f'] * inputs['Leq'])
+        k = fi * (1. - 2. * fi.abs()) * inputs['nt'] / (inputs['f'] * inputs['Leq'])
         return dict(), dict(
             IIN=inputs['VOUT'] * k,
-            IOUT=inputs['VIN'].abs() * inputs['nt'] * k,
+            IOUT=inputs['VIN'].abs() * k,
         )
 
 
@@ -186,24 +186,28 @@ class TestDABReg(SymBlock):
     # State
     e_I = StateValue(shape=(1,), descr='Difference from set value - integrated')
     # state = StateValue(shape=(16,), descr='DAB regulator internal state')
-    lstm_state_1 = StateValue(shape=(2, 20), descr='DAB regulator internal state')
-    lstm_state_2 = StateValue(shape=(2, 20), descr='DAB regulator internal state')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        n_lstm = 16
         n = 64
 
-        self.lstm = LSTM(4, 20, num_layers=2, batch_first=True)
+        self.lstm_state_1 = StateValue(shape=(2, n_lstm), descr='DAB regulator internal state')
+        self.lstm_state_2 = StateValue(shape=(2, n_lstm), descr='DAB regulator internal state')
+
+        self.lstm = LSTM(4, n_lstm, num_layers=2, batch_first=True)
         self.model = Sequential(
-            LinearBlock(20, 64),
+            LinearBlock(n_lstm, n),
             AlphaDropout(0.04),
-            LinearBlock(64, n),
+            LinearBlock(n, n),
             ResidualSequential(
                 LinearBlock(n, n),
-                LinearBlock(n, n),
-                LinearBlock(n, n),
-                LinearBlock(n, n),
+                # LinearBlock(n, n),
+                # LinearBlock(n, n),
+                # LinearBlock(n, n),
+                # LinearBlock(n, n),
+                # LinearBlock(n, n),
             ),
             # AlphaDropout(0.04),
             LinearBlock(n, n),
@@ -215,16 +219,15 @@ class TestDABReg(SymBlock):
     ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
         e_I = (inputs['e_I'] + inputs['e'] / inputs['f']).tanh()
         # e_I = inputs['e_I']
-        new_state = {}
 
         lstm_in = assemble_inputs(
             inputs | dict(
                 e_I=e_I,
             ), ('VIN', 'e', 'e_I', 'f')
-        ).unsqueeze(-2)  # 1 lstm layer
-        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, (
-            inputs['lstm_state_1'].transpose(0, 1),  # batch as second dim
-            inputs['lstm_state_2'].transpose(0, 1)
+        )
+        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in.unsqueeze(-2), (  # lstm needs additional dim
+            inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
+            inputs['lstm_state_2'].transpose(0, 1).contiguous()
         ))
         model_out = self.model.forward(lstm_out.squeeze(-2))
 
@@ -234,6 +237,7 @@ class TestDABReg(SymBlock):
             lstm_state_1=lstm_state_1.transpose(0, 1),
             lstm_state_2=lstm_state_2.transpose(0, 1),
         ), dict(
+            fi_v=fi_v,
             fi=fi_v.tanh() * .5,
         )
 
@@ -271,7 +275,7 @@ class DABRCModel(SymBlock):
         dab_state, dab_outputs = self.dab_model.compute_step(
             inputs | dict(
                 fi=reg_outputs['fi'],
-                Leq=1e-5, nt=8.,
+                Leq=25e-6, nt=.12,
             )
         )
 
@@ -286,6 +290,7 @@ class DABRCModel(SymBlock):
             VOUT=vout,
         ), reg_outputs | dict(
             VOUT=vout,
+            iout=iout,
         )
 
 
@@ -378,8 +383,8 @@ def prepare_out_params(n):
 
     steps_min_period = 1000
     steps_max_period = 10000
-    r_min = 1
-    r_max = 10
+    r_min = .1
+    r_max = 1
     c_min = 1e-5
     c_max = 1e-4
 

@@ -6,7 +6,7 @@ import numpy as np
 from torch import tensor, stack, float32, save, load, Tensor, from_numpy
 from torch.nn.functional import smooth_l1_loss
 
-from model import Values
+from model import Values, ValuesRec
 from named_tensor import NamedTensor
 
 
@@ -36,20 +36,34 @@ def values_to(
     }
 
 
-def stack_values(values: List[Values], axis: int = 0):
-    return {
-        k: stack([v[k] for v in values], dim=axis)
-        for k in values[0]
-    }
+def detach_values(values: ValuesRec):
+    r = {}
+    for k, v in values.items():
+        if isinstance(v, dict):
+            r[k] = detach_values(v)
+        else:
+            r[k] = v.detach()
+    return r
 
 
-def merge_values(*values: Dict):
+def stack_values(values: List[ValuesRec], axis: int = 0):
+    r = {}
+    for k in values[0].keys():
+        vs = [v[k] for v in values]
+        if isinstance(vs[0], dict):
+            r[k] = stack_values(vs, axis=axis)
+        else:
+            r[k] = stack(vs, dim=axis)
+    return r
+
+
+def merge_values(*values: ValuesRec):
     r = {}
     all_keys = set(
         chain.from_iterable(v.keys() for v in values)
     )
     for k in all_keys:
-        key_values = [v[k] for v in values if k in v and v[k] is not None]
+        key_values = [v[k] for v in values if v.get(k) is not None]
         if len(key_values) == 0:
             continue
 
@@ -60,6 +74,35 @@ def merge_values(*values: Dict):
         else:
             raise ValueError(f'Cannot merge values for key {k}')
     return r
+
+
+def get_range(values: ValuesRec, start: int, end: int):
+    r = {}
+    for k, v in values.items():
+        if isinstance(v, dict):
+            r[k] = get_range(v, start, end)
+        else:
+            r[k] = v[start:end]
+    return r
+
+
+def get_at_pos(values: ValuesRec, pos: int):
+    r = {}
+    for k, v in values.items():
+        if isinstance(v, dict):
+            r[k] = get_at_pos(v, pos)
+        else:
+            r[k] = v[pos]
+    return r
+
+
+def set_range(values: ValuesRec, start: int, new_values: Values):
+    for k, nv in new_values.items():
+        v = values[k]
+        if isinstance(nv, dict):
+            set_range(v, start, nv)
+        else:
+            v[start:start + nv.shape[0]] = nv
 
 
 def stack_values_np(

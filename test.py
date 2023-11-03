@@ -1,4 +1,5 @@
 from typing import Any
+from model import Values, ValuesRec
 
 import numpy as np
 from pydantic import BaseModel
@@ -196,14 +197,15 @@ def optimize():
 # adapt_model(DABLowRef, dataset, l1_loss_normalized(dataset), .15, device=default_device())
 
 
-def dab_rc_loss_func(outputs: Tensor, inputs, steps_count):
+def dab_rc_loss_func(outputs: Values, inputs: ValuesRec):
     from torch import linspace
 
     device = outputs['VOUT'].device
+    steps_count = outputs['VOUT'].shape[0]
     loss_weights = linspace(.1, 1., steps_count, device=device) ** 1.5
     values = (
-            (outputs['VOUT'][:steps_count] - inputs['VOUT_set'][:steps_count]) * loss_weights
-    ).abs()
+            (outputs['VOUT'] - inputs['VOUT_set']) * loss_weights
+    ).abs() + outputs['iout'].abs() * .1 + outputs['fi_v'].abs() * .1
 
     # values[~values.isfinite() | (values > 1e3)] = 0.
 
@@ -216,9 +218,12 @@ def dab_rc_loss_func(outputs: Tensor, inputs, steps_count):
 def optimize_test_dab():
     n = 4096
     model_input = prepare_test_cases(n) | prepare_out_params(n)
+    init_state = dict(
+        VOUT=model_input['VOUT_set']
+    )
     for k, v in model_input.items():
         print(k, tuple(v[it].mean() for it in range(50)))
-    adapt_rc_dab_reg(DABRCModel(), model_input, dab_rc_loss_func, 20., device=default_device())
+    adapt_rc_dab_reg(DABRCModel(), model_input, init_state, dab_rc_loss_func, 20, 35., device=default_device())
 
 
 optimize_test_dab()
