@@ -154,6 +154,9 @@ def run_dab_rc_sim(
     for step in range(steps_count):
         model_inputs = get_at_pos(input_data, step)
 
+        # cut gradients
+        model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
+
         model_state, outputs = model.compute_step(
             merge_values(model_inputs, model_state)
         )
@@ -184,13 +187,13 @@ def adapt_rc_dab_reg(
     )
     model_states = merge_values(model_states, init_state)
 
-    steps_count = 2
+    steps_count = 1
 
-    model_lr = 1e-5
+    model_lr = 7e-6
 
     # AdamW ?
     # Adamax +
-    optimizer_params = ASGD(model.parameters(), **get_step_params(model_lr, steps_count))
+    optimizer_params = Adamax(model.parameters(), **get_step_params(model_lr, steps_count))
 
     start_pos = 0
 
@@ -200,8 +203,8 @@ def adapt_rc_dab_reg(
     while True:  # Training loop
         optimizer_params.zero_grad()
 
-        start = 1024
-        # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
+        # start = 1024
+        start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
         # start = start_pos
         end = start + steps_count
         model_inputs = get_range(dataset, start, end)
@@ -216,7 +219,8 @@ def adapt_rc_dab_reg(
         loss_mean = loss.mean()
         loss_max = loss.max()
 
-        (loss_max * uniform(.01, .05) + loss_mean).backward()
+        (loss_max * uniform(.001, .005) + loss_mean).backward()
+        # loss_mean.backward()
         loss_mean = float(loss_mean)
         loss_max = float(loss_max)
         if abs(loss_max - last_max_loss) < 1e-6:
@@ -238,7 +242,7 @@ def adapt_rc_dab_reg(
             optimizer_params.step()
             set_optimizer_params(optimizer_params, get_step_params(model_lr, steps_count))
 
-        print(f'{steps_count + 1}/{dataset_shape_prefix[0]} stert_pos={start} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+        print(f'{steps_count + 1}/{dataset_shape_prefix[0]} start_pos={start} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
 
         # start_pos += steps_count
         # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:

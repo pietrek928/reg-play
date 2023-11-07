@@ -1,6 +1,6 @@
 from typing import Tuple, Dict, Type
 
-from torch import Tensor, cat
+from torch import Tensor, cat, exp
 from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, GELU, ELU, Sigmoid, AlphaDropout, LSTM
 
 from model import OutputValue, InputValue, Values, TorchModel, StateValue, SymBlock, ValuesRec, ValuesDescr
@@ -190,21 +190,22 @@ class TestDABReg(SymBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        n_lstm = 16
+        lstm_layers = 2
+        n_lstm = 32
         n = 64
 
-        self.lstm_state_1 = StateValue(shape=(2, n_lstm), descr='DAB regulator internal state')
-        self.lstm_state_2 = StateValue(shape=(2, n_lstm), descr='DAB regulator internal state')
+        self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
+        self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
 
-        self.lstm = LSTM(4, n_lstm, num_layers=2, batch_first=True)
+        self.lstm = LSTM(5, n_lstm, num_layers=lstm_layers, batch_first=True)
         self.model = Sequential(
             LinearBlock(n_lstm, n),
-            AlphaDropout(0.04),
+            # AlphaDropout(0.04),
             LinearBlock(n, n),
             ResidualSequential(
                 LinearBlock(n, n),
-                # LinearBlock(n, n),
-                # LinearBlock(n, n),
+                LinearBlock(n, n),
+                LinearBlock(n, n),
                 # LinearBlock(n, n),
                 # LinearBlock(n, n),
                 # LinearBlock(n, n),
@@ -217,13 +218,14 @@ class TestDABReg(SymBlock):
     def compute_step(
             self, inputs: ValuesRec
     ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
-        e_I = (inputs['e_I'] + inputs['e'] / inputs['f']).tanh()
+        e = inputs['VOUT_set'] - inputs['VOUT']
+        e_I = (inputs['e_I'] + e / inputs['f']).tanh()
         # e_I = inputs['e_I']
 
         lstm_in = assemble_inputs(
             inputs | dict(
                 e_I=e_I,
-            ), ('VIN', 'e', 'e_I', 'f')
+            ), ('VIN', 'VOUT', 'VOUT_set', 'e_I', 'f')
         )
         lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in.unsqueeze(-2), (  # lstm needs additional dim
             inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
@@ -268,7 +270,8 @@ class DABRCModel(SymBlock):
     ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
         reg_state, reg_outputs = self.reg_model.compute_step(
             inputs | inputs['reg_model'] | dict(
-                e=inputs['VOUT_set'] - inputs['VOUT'],
+                VOUT_set=inputs['VOUT_set'],
+                VOUT=inputs['VOUT'],
             )
         )
 
@@ -281,8 +284,10 @@ class DABRCModel(SymBlock):
 
         vout = inputs['VOUT']
         iout = dab_outputs['IOUT']
-        ic = iout - vout / inputs['R']
-        vout += ic / (inputs['C'] * inputs['f'])
+        
+        R = inputs['R']
+        a = exp(-1. / (R * inputs['C'] * inputs['f']))
+        vout = vout * a + (1. - a) * iout * R
 
         return dict(
             reg_model=reg_state
@@ -348,7 +353,7 @@ def prepare_test_cases(n):
 
     cases = []
     for f in np.linspace(f_min, f_max + 1e-6, 100):
-        for _ in range(10):
+        for _ in range(5):
             uin = np.random.uniform(uin_min, uin_max)
             uout = np.random.uniform(uout_min, uout_max)
             fin = np.random.uniform(fin_min, fin_max)
@@ -385,11 +390,11 @@ def prepare_out_params(n):
     steps_max_period = 10000
     r_min = .1
     r_max = 1
-    c_min = 1e-5
-    c_max = 1e-4
+    c_min = 1e-4
+    c_max = 1e-3
 
     cases = []
-    for _ in range(3000):
+    for _ in range(1500):
         cases.append(dict(
             R=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, r_max - r_min) + r_min,
             C=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, c_max - c_min) + c_min,
