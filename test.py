@@ -223,7 +223,7 @@ def optimize_test_dab():
     )
     for k, v in model_input.items():
         print(k, tuple(v[it].mean() for it in range(50)))
-    adapt_rc_dab_reg(DABRCModel(), model_input, init_state, dab_rc_loss_func, 1, 150., device=default_device())
+    adapt_rc_dab_reg(DABRCModel(), model_input, init_state, dab_rc_loss_func, 150, 150., device=default_device())
 
 
 optimize_test_dab()

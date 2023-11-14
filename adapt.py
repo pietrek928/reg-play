@@ -189,11 +189,17 @@ def adapt_rc_dab_reg(
 
     steps_count = 1
 
-    model_lr = 7e-6
+    model_lr = 1e-3
 
     # AdamW ?
     # Adamax +
-    optimizer_params = Adamax(model.parameters(), **get_step_params(model_lr, steps_count))
+    lstm_loss_div = 65
+    optimizer_reg = Adamax(tuple(
+        p for n, p in model.named_parameters() if 'lstm' not in n
+    ), **get_step_params(model_lr, steps_count))
+    optimizer_lstm = Adam(tuple(
+        p for n, p in model.named_parameters() if 'lstm' in n
+    ), **get_step_params(model_lr / lstm_loss_div, steps_count))
 
     start_pos = 0
 
@@ -201,10 +207,11 @@ def adapt_rc_dab_reg(
     last_mean_loss = 0.
     max_stuck_count = 0
     while True:  # Training loop
-        optimizer_params.zero_grad()
+        optimizer_reg.zero_grad()
+        optimizer_lstm.zero_grad()
 
-        # start = 1024
-        start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
+        start = 1024
+        # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
         # start = start_pos
         end = start + steps_count
         model_inputs = get_range(dataset, start, end)
@@ -239,8 +246,10 @@ def adapt_rc_dab_reg(
         # clip_grad_value_(model.parameters(), clip_value=1.0)
         if not bad_loss or steps_count < 5:
             # set_range(model_states, start+1, detach_values(new_states))
-            optimizer_params.step()
-            set_optimizer_params(optimizer_params, get_step_params(model_lr, steps_count))
+            optimizer_reg.step()
+            optimizer_lstm.step()
+            set_optimizer_params(optimizer_reg, get_step_params(model_lr, steps_count))
+            set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, steps_count))
 
         print(f'{steps_count + 1}/{dataset_shape_prefix[0]} start_pos={start} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
 

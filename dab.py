@@ -1,7 +1,7 @@
 from typing import Tuple, Dict, Type
 
 from torch import Tensor, cat, exp
-from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, GELU, ELU, Sigmoid, AlphaDropout, LSTM
+from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, GELU, ELU, ReLU, Sigmoid, AlphaDropout, LSTM
 
 from model import OutputValue, InputValue, Values, TorchModel, StateValue, SymBlock, ValuesRec, ValuesDescr
 from named_tensor import NamedTensor
@@ -24,7 +24,7 @@ class ResidualSequential(Sequential):
 class LinearBlock(Module):
     def __init__(
             self, in_features, out_features,
-            activation_cls: Type[Module] = SELU,
+            activation_cls: Type[Module] = ReLU,
             normalize=True,
     ):
         super().__init__()
@@ -191,7 +191,7 @@ class TestDABReg(SymBlock):
         super().__init__(*args, **kwargs)
 
         lstm_layers = 2
-        n_lstm = 32
+        n_lstm = 64
         n = 64
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
@@ -201,14 +201,13 @@ class TestDABReg(SymBlock):
         self.model = Sequential(
             LinearBlock(n_lstm, n),
             # AlphaDropout(0.04),
-            LinearBlock(n, n),
             ResidualSequential(
                 LinearBlock(n, n),
                 LinearBlock(n, n),
                 LinearBlock(n, n),
-                # LinearBlock(n, n),
-                # LinearBlock(n, n),
-                # LinearBlock(n, n),
+                LinearBlock(n, n),
+                LinearBlock(n, n),
+                LinearBlock(n, n),
             ),
             # AlphaDropout(0.04),
             LinearBlock(n, n),
