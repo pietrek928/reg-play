@@ -5,8 +5,9 @@ from typing import Tuple, Dict, Any, List
 import numpy as np
 from torch import tensor, stack, float32, save, load, Tensor, from_numpy
 from torch.nn.functional import smooth_l1_loss
+from torch.nn.parameter import Parameter
 
-from model import Values, ValuesRec
+from model import ParamsRec, Values, ValuesRec
 from named_tensor import NamedTensor
 
 
@@ -46,14 +47,29 @@ def detach_values(values: ValuesRec):
     return r
 
 
-def stack_values(values: List[ValuesRec], axis: int = 0):
+def extract_params(params: ParamsRec):
+    r = {}
+    for k, v in params.items():
+        if isinstance(v, dict):
+            r[k] = extract_params(v)
+        else:
+            if isinstance(v, Parameter):
+                r[k] = v.data.cpu()
+            else:
+                r[k] = v.cpu()
+    return r
+
+
+def stack_values(values: List[ValuesRec], axis: int = 0, append_dim=False):
     r = {}
     for k in values[0].keys():
         vs = [v[k] for v in values]
         if isinstance(vs[0], dict):
-            r[k] = stack_values(vs, axis=axis)
+            r[k] = stack_values(vs, axis=axis, append_dim=append_dim)
         else:
-            r[k] = stack(vs, dim=axis)
+            r[k] = stack(vs, axis=axis)
+            if append_dim:
+                r[k] = r[k][..., None]
     return r
 
 
@@ -76,25 +92,46 @@ def merge_values(*values: ValuesRec):
     return r
 
 
-def get_range(values: ValuesRec, start: int, end: int):
+def get_range(values: ValuesRec, start: int, end: int, dim: int = 0):
     r = {}
     for k, v in values.items():
         if isinstance(v, dict):
-            r[k] = get_range(v, start, end)
+            r[k] = get_range(v, start, end, dim)
         else:
-            r[k] = v[start:end]
+            match dim:
+                case 0:
+                    r[k] = v[start:end]
+                case 1:
+                    r[k] = v[:, start:end]
+                case _:
+                    raise ValueError(f'Cannot get_range for dim {dim}')
     return r
 
 
-def get_at_pos(values: ValuesRec, pos: int):
+def get_at_pos(values: ValuesRec, pos: int, dim: int = 0):
     r = {}
     for k, v in values.items():
         if isinstance(v, dict):
-            r[k] = get_at_pos(v, pos)
+            r[k] = get_at_pos(v, pos, dim)
         else:
-            r[k] = v[pos]
+            match dim:
+                case 0:
+                    r[k] = v[pos]
+                case 1:
+                    r[k] = v[:, pos]
+                case _:
+                    raise ValueError(f'Cannot get_at_pos for dim {dim}')
     return r
 
+
+def get_shapes(values: ValuesRec):
+    r = {}
+    for k, v in values.items():
+        if isinstance(v, dict):
+            r[k] = get_shapes(v)
+        else:
+            r[k] = v.shape
+    return r
 
 def set_range(values: ValuesRec, start: int, new_values: Values):
     for k, nv in new_values.items():

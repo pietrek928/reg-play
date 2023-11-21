@@ -26,6 +26,7 @@ Values = Dict[str, Tensor]
 ValuesRec = Dict[str, Union[Tensor, 'ValuesRec']]
 ValuesDescr = Dict[str, ValueDescr]
 ValuesDescrRec = Dict[str, Union[ValueDescr, 'ValuesDescrRec']]
+ParamsRec = Dict[str, Union[Parameter, 'ParamsRec']]
 
 
 class InputValue(ValueDescr):
@@ -57,7 +58,9 @@ class SymBlock(Module):
         states = self.extract_attrs(StateValue)
         for name, submodel in self.extract_attrs(SymBlock).items():
             if isinstance(submodel, SymBlock):
-                states[name] = submodel.get_state()
+                substate = submodel.get_state()
+                if substate:
+                    states[name] = submodel.get_state()
         return states
 
     def compute_step(

@@ -1,14 +1,16 @@
+from math import exp
 from random import randint, uniform
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Tuple
 
-from torch.optim import Adamax, SGD, Adam, AdamW, ASGD
+from torch.optim import Adamax, SGD, Adam, AdamW, ASGD, Rprop, RMSprop, NAdam, Adagrad, Adadelta
 from torch.nn.utils import clip_grad_norm_, clip_grad_value_
 
 from grad import sum_vals, GradVar
 from model import ValuesRec, validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
 from named_tensor import NamedTensor
 from obj import Block, Tm
-from utils import detach_values, get_at_pos, get_range, set_range, values_to, stack_values, merge_values
+from utils import detach_values, extract_params, get_at_pos, get_range, get_shapes, set_range, values_to, stack_values, merge_values
+from vis import plot_time_graphs
 
 
 def set_optimizer_params(optimizer, new_params):
@@ -18,6 +20,14 @@ def set_optimizer_params(optimizer, new_params):
 
 def get_step_params(lr, step):
     lr /= step
+    return dict(
+        lr=lr,
+        weight_decay=lr * 1e-3,
+    )
+
+
+def get_control_step_params(lr, step):
+    lr *= exp(-step / 200)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -148,14 +158,14 @@ def run_dab_rc_sim(
         model: SymBlock, input_data: ValuesRec, model_state: ValuesRec
 ):
     output_history = []
-    state_history = []
+    state_history = [model_state]
 
     steps_count = input_data[next(iter(input_data.keys()))].shape[0]
     for step in range(steps_count):
         model_inputs = get_at_pos(input_data, step)
 
         # cut gradients
-        model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
+        # model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
 
         model_state, outputs = model.compute_step(
             merge_values(model_inputs, model_state)
@@ -189,19 +199,19 @@ def adapt_rc_dab_reg(
 
     steps_count = 1
 
-    model_lr = 1e-3
+    model_lr = 4e-3
 
     # AdamW ?
     # Adamax +
-    lstm_loss_div = 65
+    lstm_loss_div = 72
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
     ), **get_step_params(model_lr, steps_count))
-    optimizer_lstm = Adam(tuple(
+    optimizer_lstm = AdamW(tuple(
         p for n, p in model.named_parameters() if 'lstm' in n
     ), **get_step_params(model_lr / lstm_loss_div, steps_count))
 
-    start_pos = 0
+    # start_pos = 0
 
     last_max_loss = 0.
     last_mean_loss = 0.
@@ -210,18 +220,18 @@ def adapt_rc_dab_reg(
         optimizer_reg.zero_grad()
         optimizer_lstm.zero_grad()
 
-        start = 1024
+        # start = 0
         # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
         # start = start_pos
-        end = start + steps_count
-        model_inputs = get_range(dataset, start, end)
+        # end = start + steps_count
+        # model_inputs = get_range(dataset, start, end)
 
         new_states, outputs = run_dab_rc_sim(
             # FIXME: why detach needed ???
-            model, model_inputs, detach_values(get_at_pos(model_states, start))
+            model, dataset, detach_values(get_at_pos(model_states, 0))
         )
 
-        loss = loss_func(outputs, model_inputs)
+        loss = loss_func(outputs, dataset)
 
         loss_mean = loss.mean()
         loss_max = loss.max()
@@ -248,25 +258,120 @@ def adapt_rc_dab_reg(
             # set_range(model_states, start+1, detach_values(new_states))
             optimizer_reg.step()
             optimizer_lstm.step()
-            set_optimizer_params(optimizer_reg, get_step_params(model_lr, steps_count))
-            set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, steps_count))
+            set_optimizer_params(optimizer_reg, get_step_params(model_lr, 1))
+            set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
 
-        print(f'{steps_count + 1}/{dataset_shape_prefix[0]} start_pos={start} loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+        print(f'loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
 
         # start_pos += steps_count
         # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
         #     start_pos = 0
 
-        if loss_mean < target_loss and not bad_loss:
-            if steps_count < target_steps_count:
-                # steps_count += randint(0, 10) // 8
-                steps_count += 1
-            # else:
-            #     break
-        elif bad_loss:
-            if steps_count > 2:
-                steps_count -= randint(1, 2)
-            elif steps_count > 1:
-                steps_count -= 1
-            # else:
-                # break
+        # if loss_mean < target_loss and not bad_loss:
+        #     if steps_count < target_steps_count:
+        #         # steps_count += randint(0, 10) // 8
+        #         steps_count += 1
+        #     # else:
+        #     #     break
+        # elif bad_loss:
+        #     if steps_count > 2:
+        #         steps_count -= randint(1, 2)
+        #     elif steps_count > 1:
+        #         steps_count -= 1
+        #     # else:
+        #         # break
+
+
+def adapt_rc_dab_control(
+        model: SymBlock, dataset: Dict[str, Any], loss_func,
+        control_keys: Tuple[str, ...], device=None
+):
+    model.to(device)
+    model.eval()
+    dataset = values_to(dataset, device=device)
+
+    inputs_descr = model.get_inputs()
+    control_descr = {}
+    for k in control_keys:
+        control_descr[k] = inputs_descr.pop(k)
+    outputs_descr = model.get_outputs()
+
+    dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
+    if len(dataset_shape_prefix) != 2:
+        raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+
+    model_states = init_zero_values(
+        model.get_state(), base_shape=dataset_shape_prefix[1:], device=device
+    )
+    controls = init_zero_params(
+        control_descr, base_shape=dataset_shape_prefix, device=device
+    )
+
+    case_count = dataset_shape_prefix[1]
+    batch_size = 256
+    step = 0
+
+    model_lr = 1e-1
+
+    # AdamW +
+    # Adamax ++
+    optimizer_controls = AdamW(
+        tuple(controls.values()), **get_control_step_params(model_lr, step)
+    )
+
+    try:
+        while True:  # Training loop
+            optimizer_controls.zero_grad()
+
+            losses_mean = []
+            losses_max = []
+            for start_case in range(0, case_count, batch_size):
+                end_case = min(start_case + batch_size, case_count)
+                model_inputs = get_range(dataset | controls, start_case, end_case, dim=1)
+
+                new_states, outputs = run_dab_rc_sim(
+                    model, model_inputs, get_range(model_states, start_case, end_case, dim=0)
+                )
+
+                loss = loss_func(outputs, model_inputs)
+
+                loss_mean = loss.mean()
+                loss_max = loss.max()
+
+                # (loss_max * uniform(.001, .005) + loss_mean).backward()
+                loss_mean.backward()
+                losses_mean.append(float(loss_mean))
+                losses_max.append(float(loss_max))
+
+            optimizer_controls.step()
+            train_params = get_control_step_params(model_lr, step)
+            set_optimizer_params(optimizer_controls, train_params)
+            step += 1
+
+            loss_mean = sum(losses_mean) / len(losses_mean)
+            loss_max = sum(losses_max) / len(losses_max)
+            print(f'loss_mean={loss_mean} loss_max={loss_max} lr={train_params["lr"]}')
+    
+    except KeyboardInterrupt:
+        pass
+
+    return extract_params(controls)
+
+
+def compute_rc_dab_sym_params(model: SymBlock, dataset: ValuesRec, device=None):
+    dataset = values_to(dataset, device=device)
+
+    inputs_descr = model.get_inputs()
+    outputs_descr = model.get_outputs()
+    dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
+    if len(dataset_shape_prefix) != 2:
+        raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
+
+    model_states = init_zero_values(
+        model.get_state(), base_shape=dataset_shape_prefix[1:], device=device
+    )
+    new_states, outputs = run_dab_rc_sim(
+        model, dataset, model_states
+    )
+
+    return merge_values(get_range(new_states, 0, dataset_shape_prefix[0]), outputs)

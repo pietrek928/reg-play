@@ -1,3 +1,5 @@
+from random import randrange
+from sys import argv
 from typing import Any
 from model import Values, ValuesRec
 
@@ -5,12 +7,12 @@ import numpy as np
 from pydantic import BaseModel
 from torch import Tensor
 
-from adapt import score_controller, fill_with_grad, adapt_rc_dab_reg
-from dab import prepare_test_cases, prepare_out_params, DABRCModel
+from adapt import adapt_rc_dab_control, compute_rc_dab_sym_params, score_controller, fill_with_grad, adapt_rc_dab_reg
+from dab import DABRCOptimModel, prepare_test_cases, prepare_out_params, DABRCModel
 from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
-from utils import default_device
-from vis import plot_controller_sym
+from utils import default_device, get_at_pos, get_shapes, merge_values
+from vis import plot_controller_sym, plot_time_graphs
 
 
 class SolderState(BaseModel):
@@ -200,12 +202,12 @@ def optimize():
 def dab_rc_loss_func(outputs: Values, inputs: ValuesRec):
     from torch import linspace
 
-    device = outputs['VOUT'].device
-    steps_count = outputs['VOUT'].shape[0]
-    loss_weights = linspace(.1, 1., steps_count, device=device) ** 1.5
+    # device = outputs['VOUT'].device
+    # steps_count = outputs['VOUT'].shape[0]
+    # loss_weights = linspace(.1, 1., steps_count, device=device) ** 1.7
     values = (
-            (outputs['VOUT'] - inputs['VOUT_set']) * loss_weights
-    ).abs() ** 1.7 + outputs['iout'].abs() * .01 + outputs['fi_v'].abs() * .01
+            (outputs['VOUT'] - inputs['VOUT_set'])  # * loss_weights
+    ).abs() + outputs['iout'].abs() * .01 + outputs['fi_v'].abs() * .01
 
     # values[~values.isfinite() | (values > 1e3)] = 0.
 
@@ -215,15 +217,63 @@ def dab_rc_loss_func(outputs: Values, inputs: ValuesRec):
     return values
 
 
+def dab_rc_control_loss_func(outputs: Values, inputs: ValuesRec):
+    from torch import linspace
+
+    # device = outputs['VOUT'].device
+    # steps_count = outputs['VOUT'].shape[0]
+    # loss_weights = linspace(.1, 1., steps_count, device=device)
+    P_out = outputs['VOUT'] * outputs['iout']
+    P_in = inputs['VIN'] * outputs['iin']
+    values = (
+            (outputs['VOUT'] - inputs['VOUT_set']) # * loss_weights
+    ).abs() + P_out.abs() * .001 + P_in.abs() * .001 + inputs['fi_reg'].abs() * .01
+
+    # values[~values.isfinite() | (values > 1e3)] = 0.
+
+    # smaller gradient for clamped values
+    # values = values.clamp(max=1e3)
+    # return (clamped + (values - clamped) * .001).mean()
+    return values
+
+
+def prepare_train_control():
+    import torch
+
+    n = 1024 * 3
+    case_count = 1494
+    model_input = prepare_test_cases(n, case_count) | prepare_out_params(n, case_count)
+    controls = adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
+    rest_params = compute_rc_dab_sym_params(DABRCOptimModel(), merge_values(model_input, controls), device=default_device())
+
+    all_params = merge_values(model_input, controls, rest_params)
+    torch.save(all_params, 'controls.pt')
+
+
+def show_optimized_control():
+    import torch
+
+    data = torch.load('controls.pt', map_location='cpu')
+    print(f'loss={float(dab_rc_control_loss_func(data, data).mean())}')
+    for _ in range(16):
+        n = randrange(0, 1494)
+        plot_time_graphs(get_at_pos(data, n, dim=1), ('VIN', 'VOUT_set', 'VOUT', 'R', 'C', 'iout', 'fi_reg'))
+
+
 def optimize_test_dab():
-    n = 4096
-    model_input = prepare_test_cases(n) | prepare_out_params(n)
+    n = 1024
+    case_count = 612
+    model_input = prepare_test_cases(n, case_count) | prepare_out_params(n, case_count)
+    # plot_time_graphs(get_at_pos(model_input, 456), ('VIN', 'VOUT_set', 'R', 'C'))
     init_state = dict(
         VOUT=model_input['VOUT_set']
     )
-    for k, v in model_input.items():
-        print(k, tuple(v[it].mean() for it in range(50)))
+    # for k, v in model_input.items():
+    #     print(k, tuple(v[it].mean() for it in range(50)))
     adapt_rc_dab_reg(DABRCModel(), model_input, init_state, dab_rc_loss_func, 150, 150., device=default_device())
+    # adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
 
 
-optimize_test_dab()
+if __name__ == '__main__':
+    func_name = argv[1]
+    globals()[func_name](*argv[2:])

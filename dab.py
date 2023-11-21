@@ -1,11 +1,11 @@
 from typing import Tuple, Dict, Type
 
-from torch import Tensor, cat, exp
+from torch import Tensor, arange, cat, exp, float32, ones, zeros
 from torch.nn import Sequential, Linear, Module, BatchNorm1d, SELU, GELU, ELU, ReLU, Sigmoid, AlphaDropout, LSTM
 
 from model import OutputValue, InputValue, Values, TorchModel, StateValue, SymBlock, ValuesRec, ValuesDescr
 from named_tensor import NamedTensor
-from utils import compute_dt, stack_values_np
+from utils import compute_dt, stack_values, stack_values_np
 
 
 class ResidualSequential(Sequential):
@@ -24,7 +24,7 @@ class ResidualSequential(Sequential):
 class LinearBlock(Module):
     def __init__(
             self, in_features, out_features,
-            activation_cls: Type[Module] = ReLU,
+            activation_cls: Type[Module] = SELU,
             normalize=True,
     ):
         super().__init__()
@@ -192,7 +192,7 @@ class TestDABReg(SymBlock):
 
         lstm_layers = 2
         n_lstm = 64
-        n = 64
+        n = 128
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
@@ -206,8 +206,8 @@ class TestDABReg(SymBlock):
                 LinearBlock(n, n),
                 LinearBlock(n, n),
                 LinearBlock(n, n),
-                LinearBlock(n, n),
-                LinearBlock(n, n),
+                # LinearBlock(n, n),
+                # LinearBlock(n, n),
             ),
             # AlphaDropout(0.04),
             LinearBlock(n, n),
@@ -277,7 +277,7 @@ class DABRCModel(SymBlock):
         dab_state, dab_outputs = self.dab_model.compute_step(
             inputs | dict(
                 fi=reg_outputs['fi'],
-                Leq=25e-6, nt=.12,
+                Leq=25e-6, nt=.24,
             )
         )
 
@@ -298,48 +298,95 @@ class DABRCModel(SymBlock):
         )
 
 
+class DABRCOptimModel(SymBlock):
+    R = InputValue(descr='Load resistance[Ohm]')
+    C = InputValue(descr='Load capacitance[F]')
+    fi_reg = InputValue(descr='target output voltage value[V]')
+    VOUT_set = InputValue(descr='target output voltage value[V]')
+
+    VOUT = StateValue(descr='Output capacitor voltage[V]')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.dab_model = DABLowSimple()
+
+    def get_inputs(self) -> ValuesDescr:
+        return super().get_inputs() | dict(
+            Leq=self.dab_model.Leq,
+            nt=self.dab_model.nt,
+            VIN=self.dab_model.VIN,
+            f=self.dab_model.f,
+        )
+
+    def compute_step(
+            self, inputs: ValuesRec
+    ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
+        _, dab_outputs = self.dab_model.compute_step(
+            inputs | dict(
+                fi=inputs['fi_reg'].tanh() * .5,
+                Leq=25e-6, nt=.36,
+            )
+        )
+
+        vout = inputs['VOUT']
+        iout = dab_outputs['IOUT']
+
+        R = inputs['R']
+        a = exp((-1.) / (R * inputs['C'] * inputs['f']))
+        vout = vout * a + (1. - a) * iout * R
+
+        return dict(
+            VOUT=vout,
+        ), dict(
+            VOUT=vout,
+            iin=dab_outputs['IIN'],
+            iout=iout,
+        )
+
+
 def u_step_sin_case(n, f, vinrms, fin, vout, t_step):
     import numpy as np
-    VIN = (vinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
+    VIN = (vinrms * np.sqrt(2)) * ((2 * np.pi * fin / f) * arange(n, dtype=float32)).sin()
 
-    VOUT_set = np.zeros(n)
+    VOUT_set = zeros(n, dtype=float32)
     nt = int(t_step * f)
     it = nt
     while it < n:
         VOUT_set[it:it + nt] = vout
         it += 2 * nt
 
-    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=ones(n, dtype=float32) * f)
 
 
 def u_const_dc_step_case(n, f, vin, vout, t_step):
     import numpy as np
-    VIN = np.zeros(n)
+    VIN = zeros(n, dtype=float32)
     nt = int(t_step * f)
     it = nt
     while it < n:
         VIN[it:it + nt] = vin
         it += 2 * nt
 
-    VOUT_set = np.ones(n) * vout
+    VOUT_set = ones(n, dtype=float32) * vout
 
-    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=ones(n, dtype=float32) * f)
 
 
 def u_sin_sin_case(n, f, uinrms, fin, uoutrms, fout):
     import numpy as np
-    VIN = (uinrms * np.sqrt(2)) * np.sin((2 * np.pi * fin / f) * np.arange(n))
-    VOUT_set = (uoutrms * np.sqrt(2)) * np.sin((2 * np.pi * fout / f) * np.arange(n))
+    VIN = (uinrms * np.sqrt(2)) * ((2 * np.pi * fin / f) * arange(n, dtype=float32)).sin()
+    VOUT_set = (uoutrms * np.sqrt(2)) * ((2 * np.pi * fout / f) * arange(n, dtype=float32)).sin()
 
-    return dict(VIN=VIN, VOUT_set=VOUT_set, f=np.ones(n) * f)
+    return dict(VIN=VIN, VOUT_set=VOUT_set, f=ones(n, dtype=float32) * f)
 
 
-def prepare_test_cases(n):
+def prepare_test_cases(n, case_count):
     import numpy as np
 
-    f_min = 3e3
-    f_max = 1e4
-    uin_min = 100
+    f_min = 6e3
+    f_max = 20e3
+    uin_min = 200
     uin_max = 300
     uout_min = 30
     uout_max = 80
@@ -347,12 +394,12 @@ def prepare_test_cases(n):
     fin_max = 100
     fout_min = 50
     fout_max = 100
-    t_step_min = .1
-    t_step_max = .5
+    t_step_min = .01
+    t_step_max = .07
 
     cases = []
-    for f in np.linspace(f_min, f_max + 1e-6, 100):
-        for _ in range(5):
+    for f in np.linspace(f_min, f_max + 1e-6, case_count // 9):
+        for _ in range(3):
             uin = np.random.uniform(uin_min, uin_max)
             uout = np.random.uniform(uout_min, uout_max)
             fin = np.random.uniform(fin_min, fin_max)
@@ -363,13 +410,13 @@ def prepare_test_cases(n):
             cases.append(u_const_dc_step_case(n, f, uin, uout, t_step))
             cases.append(u_sin_sin_case(n, f, uin, fin, uout, fout))
 
-    return stack_values_np(cases, axis=-2, append_dim=True)
+    return stack_values(cases, axis=1, append_dim=True)
 
 
 def make_random_steps(n, tmin, tmax):
     import numpy as np
 
-    v = np.zeros(n, dtype=np.float32)
+    v = zeros(n, dtype=float32)
     it = 0
     while it < n:
         t = int(np.random.uniform(tmin, tmax))
@@ -382,20 +429,20 @@ def make_random_steps(n, tmin, tmax):
 
 
 # prepare output resistance and capacitance
-def prepare_out_params(n):
+def prepare_out_params(n, case_count):
     import numpy as np
 
-    steps_min_period = 1000
-    steps_max_period = 10000
-    r_min = .1
-    r_max = 1
+    steps_min_period = 50
+    steps_max_period = 500
+    r_min = 1
+    r_max = 10
     c_min = 1e-4
     c_max = 1e-3
 
     cases = []
-    for _ in range(1500):
+    for _ in range(case_count):
         cases.append(dict(
             R=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, r_max - r_min) + r_min,
             C=make_random_steps(n, steps_min_period, steps_max_period) * np.random.uniform(0, c_max - c_min) + c_min,
         ))
-    return stack_values_np(cases, axis=-2, append_dim=True)
+    return stack_values(cases, axis=1, append_dim=True)
