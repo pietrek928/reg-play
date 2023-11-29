@@ -316,7 +316,7 @@ def adapt_rc_dab_control(
     # AdamW +
     # Adamax ++
     optimizer_controls = AdamW(
-        tuple(controls.values()), **get_control_step_params(model_lr, step)
+        tuple(controls.values()), **get_control_step_params(model_lr, step), betas=(.85, .995)
     )
 
     try:

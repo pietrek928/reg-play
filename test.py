@@ -241,7 +241,7 @@ def prepare_train_control():
     import torch
 
     n = 1024 * 3
-    case_count = 1494
+    case_count = 3006
     model_input = prepare_test_cases(n, case_count) | prepare_out_params(n, case_count)
     controls = adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
     rest_params = compute_rc_dab_sym_params(DABRCOptimModel(), merge_values(model_input, controls), device=default_device())
