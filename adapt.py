@@ -19,7 +19,7 @@ def set_optimizer_params(optimizer, new_params):
 
 
 def get_step_params(lr, step):
-    lr /= step
+    lr *= exp(-step / 100)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -27,7 +27,7 @@ def get_step_params(lr, step):
 
 
 def get_control_step_params(lr, step):
-    lr *= exp(-step / 200)
+    lr *= exp(-step / 100)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -197,19 +197,19 @@ def adapt_rc_dab_reg(
     )
     model_states = merge_values(model_states, init_state)
 
-    steps_count = 1
+    step = 0
 
-    model_lr = 4e-3
+    model_lr = 1e-2
 
     # AdamW ?
     # Adamax +
     lstm_loss_div = 72
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
-    ), **get_step_params(model_lr, steps_count))
+    ), **get_step_params(model_lr, step))
     optimizer_lstm = AdamW(tuple(
         p for n, p in model.named_parameters() if 'lstm' in n
-    ), **get_step_params(model_lr / lstm_loss_div, steps_count))
+    ), **get_step_params(model_lr / lstm_loss_div, step))
 
     # start_pos = 0
 
@@ -251,17 +251,19 @@ def adapt_rc_dab_reg(
         )
         last_max_loss = loss_max
         last_mean_loss = loss_mean
+        step += 1
 
         # clip_grad_norm_(model.parameters(), clip_value=1.0)
         # clip_grad_value_(model.parameters(), clip_value=1.0)
-        if not bad_loss or steps_count < 5:
+        loss_params = get_step_params(model_lr, step)
+        if not bad_loss:
             # set_range(model_states, start+1, detach_values(new_states))
             optimizer_reg.step()
             optimizer_lstm.step()
-            set_optimizer_params(optimizer_reg, get_step_params(model_lr, 1))
+            set_optimizer_params(optimizer_reg, loss_params)
             set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
 
-        print(f'loss_mean={loss_mean} loss_max={loss_max} bad_loss={bad_loss}')
+        print(f'step={step} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
 
         # start_pos += steps_count
         # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
@@ -350,7 +352,7 @@ def adapt_rc_dab_control(
 
             loss_mean = sum(losses_mean) / len(losses_mean)
             loss_max = sum(losses_max) / len(losses_max)
-            print(f'loss_mean={loss_mean} loss_max={loss_max} lr={train_params["lr"]}')
+            print(f'step={step} loss_mean={loss_mean} loss_max={loss_max} lr={train_params["lr"]}')
     
     except KeyboardInterrupt:
         pass
