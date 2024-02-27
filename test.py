@@ -256,11 +256,15 @@ def show_optimized_control():
     data = torch.load('controls.pt', map_location='cpu')
     print(f'loss={float(dab_rc_control_loss_func(data, data).mean())}')
     for _ in range(16):
-        n = randrange(0, 1494)
+        n = randrange(0, 3006)
         plot_time_graphs(get_at_pos(data, n, dim=1), ('VIN', 'VOUT_set', 'VOUT', 'R', 'C', 'iout', 'fi_reg'))
 
 
 def optimize_test_dab():
+    import torch
+    device = default_device()
+    data = torch.load('controls.pt', map_location=device)
+
     n = 1024
     case_count = 612
     model_input = prepare_test_cases(n, case_count) | prepare_out_params(n, case_count)
