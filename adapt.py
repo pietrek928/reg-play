@@ -178,7 +178,7 @@ def run_dab_rc_sim(
 
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], init_state, loss_func,
-        target_steps_count, target_loss: float, device=None
+        guide_keys: Tuple[str, ...], target_steps_count, target_loss: float, device=None
 ):
     model.to(device)
     model.train()
@@ -231,15 +231,20 @@ def adapt_rc_dab_reg(
             model, dataset, detach_values(get_at_pos(model_states, 0))
         )
 
+        loss_guide = sum(
+            (outputs[k] - dataset[k]).abs().mean() for k in guide_keys
+        )
         loss = loss_func(outputs, dataset)
 
         loss_mean = loss.mean()
         loss_max = loss.max()
 
-        (loss_max * uniform(.001, .005) + loss_mean).backward()
+        # (loss_max * uniform(.001, .005) + loss_mean).backward()
+        loss_guide.backward()
         # loss_mean.backward()
         loss_mean = float(loss_mean)
         loss_max = float(loss_max)
+        loss_guide = float(loss_guide)
         if abs(loss_max - last_max_loss) < 1e-6:
             max_stuck_count += 1
         else:
@@ -263,7 +268,7 @@ def adapt_rc_dab_reg(
             set_optimizer_params(optimizer_reg, loss_params)
             set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
 
-        print(f'step={step} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
+        print(f'step={step} loss_guide={loss_guide} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
 
         # start_pos += steps_count
         # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
