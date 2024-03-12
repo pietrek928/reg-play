@@ -191,8 +191,8 @@ class TestDABReg(SymBlock):
         super().__init__(*args, **kwargs)
 
         lstm_layers = 2
-        n_lstm = 64
-        n = 128
+        n_lstm = 32
+        n = 64
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
@@ -214,19 +214,18 @@ class TestDABReg(SymBlock):
             Linear(n, 2),
         )
 
+    # Model gets sequence part as input
     def compute_step(
             self, inputs: ValuesRec
     ) -> Tuple[ValuesRec, ValuesRec]:  # new_state, outputs
-        e = inputs['VOUT_set'] - inputs['VOUT']
-        e_I = (inputs['e_I'] + e / inputs['f']).tanh()
+        # e = inputs['VOUT_set'] - inputs['VOUT']
+        # e_I = (inputs['e_I'] + e / inputs['f']).tanh()
         # e_I = inputs['e_I']
 
         lstm_in = assemble_inputs(
-            inputs | dict(
-                e_I=e_I,
-            ), ('VIN', 'VOUT', 'VOUT_set', 'e_I', 'f')
+            inputs, ('VIN', 'VOUT', 'VOUT_set', 'f')
         )
-        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in.unsqueeze(-2), (  # lstm needs additional dim
+        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, (
             inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
             inputs['lstm_state_2'].transpose(0, 1).contiguous()
         ))
@@ -234,7 +233,7 @@ class TestDABReg(SymBlock):
 
         fi_v = model_out[..., 0:1]
         return dict(
-            e_I=e_I,
+            # e_I=e_I,
             lstm_state_1=lstm_state_1.transpose(0, 1),
             lstm_state_2=lstm_state_2.transpose(0, 1),
         ), dict(
@@ -273,17 +272,19 @@ class DABRCModel(SymBlock):
                 VOUT=inputs['VOUT'],
             )
         )
+        fi_reg = reg_outputs['fi']
+        fi_guide = inputs['fi_guide']
 
         dab_state, dab_outputs = self.dab_model.compute_step(
             inputs | dict(
-                fi=reg_outputs['fi'],
+                fi=fi_guide,  # !!!!!!!!!!!!!
                 Leq=25e-6, nt=.24,
             )
         )
 
         vout = inputs['VOUT']
         iout = dab_outputs['IOUT']
-        
+
         R = inputs['R']
         a = exp(-1. / (R * inputs['C'] * inputs['f']))
         vout = vout * a + (1. - a) * iout * R
@@ -293,6 +294,7 @@ class DABRCModel(SymBlock):
         ) | dict(
             VOUT=vout,
         ), reg_outputs | dict(
+            fi_reg=fi_reg,
             VOUT=vout,
             iout=iout,
         )

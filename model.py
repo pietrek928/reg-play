@@ -132,18 +132,19 @@ def validate_values(values_descr: ValuesDescr, values: Values):
     prefix = None
 
     for k, v in values.items():
-        descr = values_descr[k]
-        if v.shape[-len(descr.shape):] != descr.shape:
-            raise ValueError(
-                f'Argument {k}({descr.descr}): '
-                f'Invalid value shape {v.shape} for required shape {descr.shape}'
-            )
+        if k in values_descr:
+            descr = values_descr[k]
+            if v.shape[-len(descr.shape):] != descr.shape:
+                raise ValueError(
+                    f'Argument {k}({descr.descr}): '
+                    f'Invalid value shape {v.shape} for required shape {descr.shape}'
+                )
 
-        current_prefix = v.shape[:-len(descr.shape)]
-        if prefix is None:
-            prefix = current_prefix
-        elif prefix != current_prefix:
-            raise ValueError(f'Inconsistent shape prefix {prefix} != {current_prefix}')
+            current_prefix = v.shape[:-len(descr.shape)]
+            if prefix is None:
+                prefix = current_prefix
+            elif prefix != current_prefix:
+                raise ValueError(f'Inconsistent shape prefix {prefix} != {current_prefix}')
 
     return prefix
 

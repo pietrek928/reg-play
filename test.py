@@ -1,3 +1,4 @@
+from os import environ, path
 from random import randrange
 from sys import argv
 from typing import Any
@@ -13,6 +14,9 @@ from grad import compute_grad
 from obj import DynSystem, Block, SystemBlock
 from utils import default_device, get_at_pos, get_shapes, merge_values
 from vis import plot_controller_sym, plot_time_graphs
+
+
+DATASET_PATH = path.join(environ.get('DATASET_PATH', '.'), 'reg-test')
 
 
 class SolderState(BaseModel):
@@ -247,13 +251,13 @@ def prepare_train_control():
     rest_params = compute_rc_dab_sym_params(DABRCOptimModel(), merge_values(model_input, controls), device=default_device())
 
     all_params = merge_values(model_input, controls, rest_params)
-    torch.save(all_params, 'controls.pt')
+    torch.save(all_params, path.join(DATASET_PATH, 'controls.pt'))
 
 
 def show_optimized_control():
     import torch
 
-    data = torch.load('controls.pt', map_location='cpu')
+    data = torch.load(path.join(DATASET_PATH, 'controls.pt'), map_location='cpu')
     print(f'loss={float(dab_rc_control_loss_func(data, data).mean())}')
     for _ in range(16):
         n = randrange(0, 3006)
@@ -263,18 +267,12 @@ def show_optimized_control():
 def optimize_test_dab():
     import torch
     device = default_device()
-    data = torch.load('controls.pt', map_location=device)
+    data = torch.load(path.join(DATASET_PATH, 'controls.pt'), map_location=device)
 
-    n = 1024
-    case_count = 612
-    model_input = prepare_test_cases(n, case_count) | prepare_out_params(n, case_count)
-    # plot_time_graphs(get_at_pos(model_input, 456), ('VIN', 'VOUT_set', 'R', 'C'))
-    init_state = dict(
-        VOUT=model_input['VOUT_set']
-    )
     # for k, v in model_input.items():
     #     print(k, tuple(v[it].mean() for it in range(50)))
-    adapt_rc_dab_reg(DABRCModel(), model_input, init_state, dab_rc_loss_func, 150, 150., device=default_device())
+    data['fi_guide'] = data['fi_reg']
+    adapt_rc_dab_reg(DABRCModel(), data, dab_rc_loss_func, ('fi_reg', ), 150, 150., device=default_device())
     # adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
 
 

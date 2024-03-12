@@ -170,6 +170,42 @@ def run_dab_rc_sim(
         model_state, outputs = model.compute_step(
             merge_values(model_inputs, model_state)
         )
+        # print('??????????', tuple(model_state.keys()))
+        # print('??????????', tuple(model_state['reg_model'].keys()))
+        model_state['VOUT'] = model_state['VOUT'].detach()
+        model_state['reg_model']['e_I'] = model_state['reg_model']['e_I'].detach()
+        state_history.append(model_state)
+        output_history.append(outputs)
+
+    return stack_values(state_history), stack_values(output_history)
+
+
+def run_dab_rc_sim_lookback(
+        model: SymBlock, input_data: ValuesRec, model_state: ValuesRec,
+        lookback_size: int
+):
+    output_history = []
+    state_history = []
+    
+    start_inputs = get_range(input_data, 0, lookback_size)
+    model_state, outputs = model.compute_step(
+        merge_values(start_inputs, model_state)
+    )
+    output_history.append(outputs)
+    state_history.append(model_state)
+
+    steps_count = input_data[next(iter(input_data.keys()))].shape[0]
+    for step in range(lookback_size, steps_count):
+        model_inputs = get_range(input_data, step, step + 1)
+
+        # cut gradients
+        # model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
+
+        model_state, outputs = model.compute_step(
+            merge_values(model_inputs, model_state)
+        )
+        # print('??????????', tuple(model_state.keys()))
+        # print('??????????', tuple(model_state['reg_model'].keys()))
         state_history.append(model_state)
         output_history.append(outputs)
 
@@ -177,29 +213,32 @@ def run_dab_rc_sim(
 
 
 def adapt_rc_dab_reg(
-        model: SymBlock, dataset: Dict[str, Any], init_state, loss_func,
-        guide_keys: Tuple[str, ...], target_steps_count, target_loss: float, device=None
+        model: SymBlock, dataset: Dict[str, Any], loss_func,
+        guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
+        time_batch_size=128, case_batch_size=int(2 ** 12), device=None
 ):
     model.to(device)
     model.train()
     dataset = values_to(dataset, device=device)
-    init_state = values_to(init_state, device=device)
+    # init_state = values_to(init_state, device=device)
 
     inputs_descr = model.get_inputs()
     outputs_descr = model.get_outputs()
 
+    # print(tuple(dataset.keys()))
+    # print(tuple(inputs_descr.keys()))
     dataset_shape_prefix = validate_values(inputs_descr | outputs_descr, dataset)
     if len(dataset_shape_prefix) != 2:
         raise ValueError(f'Invalid dataset shape prefix {dataset_shape_prefix}')
-    
+
     model_states = init_zero_values(
         model.get_state(), base_shape=dataset_shape_prefix, device=device
     )
-    model_states = merge_values(model_states, init_state)
+    # model_states = merge_values(model_states, init_state)
 
     step = 0
 
-    model_lr = 1e-2
+    model_lr = 1e-3
 
     # AdamW ?
     # Adamax +
@@ -217,76 +256,85 @@ def adapt_rc_dab_reg(
     last_mean_loss = 0.
     max_stuck_count = 0
     while True:  # Training loop
-        optimizer_reg.zero_grad()
-        optimizer_lstm.zero_grad()
-
-        # start = 0
-        # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
-        # start = start_pos
-        # end = start + steps_count
-        # model_inputs = get_range(dataset, start, end)
-
-        new_states, outputs = run_dab_rc_sim(
-            # FIXME: why detach needed ???
-            model, dataset, detach_values(get_at_pos(model_states, 0))
-        )
-
-        loss_guide = sum(
-            (outputs[k] - dataset[k]).abs().mean() for k in guide_keys
-        )
-        loss = loss_func(outputs, dataset)
-
-        loss_mean = loss.mean()
-        loss_max = loss.max()
-
-        # (loss_max * uniform(.001, .005) + loss_mean).backward()
-        loss_guide.backward()
-        # loss_mean.backward()
-        loss_mean = float(loss_mean)
-        loss_max = float(loss_max)
-        loss_guide = float(loss_guide)
-        if abs(loss_max - last_max_loss) < 1e-6:
-            max_stuck_count += 1
-        else:
-            max_stuck_count = 0
-        bad_loss = not (
-            abs(loss_mean) < 1e4
-            and abs(loss_max) < 1e7
-            and max_stuck_count < 15
-        )
-        last_max_loss = loss_max
-        last_mean_loss = loss_mean
         step += 1
+        for time_batch_pos in range(0, dataset_shape_prefix[0], time_batch_size):
+            dataset_time_batch = get_range(dataset, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
+            model_states_time_batch = get_range(model_states, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
+            for case_batch_pos in range(0, dataset_shape_prefix[1], case_batch_size):
+                dataset_case_batch = get_range(dataset_time_batch, case_batch_pos, case_batch_pos + case_batch_size, dim=1)
+                model_states_case_batch = get_range(model_states_time_batch, case_batch_pos, case_batch_pos + case_batch_size, dim=1)
 
-        # clip_grad_norm_(model.parameters(), clip_value=1.0)
-        # clip_grad_value_(model.parameters(), clip_value=1.0)
-        loss_params = get_step_params(model_lr, step)
-        if not bad_loss:
-            # set_range(model_states, start+1, detach_values(new_states))
-            optimizer_reg.step()
-            optimizer_lstm.step()
-            set_optimizer_params(optimizer_reg, loss_params)
-            set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
+                optimizer_reg.zero_grad()
+                optimizer_lstm.zero_grad()
 
-        print(f'step={step} loss_guide={loss_guide} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
+                # start = 0
+                # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
+                # start = start_pos
+                # end = start + steps_count
+                # model_inputs = get_range(dataset, start, end)
 
-        # start_pos += steps_count
-        # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
-        #     start_pos = 0
+                new_states, outputs = run_dab_rc_sim(
+                    # FIXME: why detach needed ???
+                    model, dataset_case_batch, detach_values(
+                        get_at_pos(model_states_case_batch, 0)
+                    )
+                )
 
-        # if loss_mean < target_loss and not bad_loss:
-        #     if steps_count < target_steps_count:
-        #         # steps_count += randint(0, 10) // 8
-        #         steps_count += 1
-        #     # else:
-        #     #     break
-        # elif bad_loss:
-        #     if steps_count > 2:
-        #         steps_count -= randint(1, 2)
-        #     elif steps_count > 1:
-        #         steps_count -= 1
-        #     # else:
-        #         # break
+                loss_guide = sum(
+                    (outputs[k] - dataset_case_batch[k]).abs().mean() for k in guide_keys
+                )
+                loss = loss_func(outputs, dataset_case_batch)
+
+                loss_mean = loss.mean()
+                loss_max = loss.max()
+
+                # (loss_max * uniform(.001, .005) + loss_mean).backward()
+                loss_guide.backward()
+                # loss_mean.backward()
+                loss_mean = float(loss_mean)
+                loss_max = float(loss_max)
+                loss_guide = float(loss_guide)
+                if abs(loss_max - last_max_loss) < 1e-6:
+                    max_stuck_count += 1
+                else:
+                    max_stuck_count = 0
+                bad_loss = not (
+                    abs(loss_mean) < 1e4
+                    and abs(loss_max) < 1e7
+                    and max_stuck_count < 15
+                )
+                last_max_loss = loss_max
+                last_mean_loss = loss_mean
+
+                # clip_grad_norm_(model.parameters(), clip_value=1.0)
+                # clip_grad_value_(model.parameters(), clip_value=1.0)
+                loss_params = get_step_params(model_lr, step)
+                if not bad_loss:
+                    # set_range(model_states, start+1, detach_values(new_states))
+                    optimizer_reg.step()
+                    optimizer_lstm.step()
+                    set_optimizer_params(optimizer_reg, loss_params)
+                    set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
+
+                print(f'step={step} loss_guide={loss_guide} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
+
+                # start_pos += steps_count
+                # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
+                #     start_pos = 0
+
+                # if loss_mean < target_loss and not bad_loss:
+                #     if steps_count < target_steps_count:
+                #         # steps_count += randint(0, 10) // 8
+                #         steps_count += 1
+                #     # else:
+                #     #     break
+                # elif bad_loss:
+                #     if steps_count > 2:
+                #         steps_count -= randint(1, 2)
+                #     elif steps_count > 1:
+                #         steps_count -= 1
+                #     # else:
+                #         # break
 
 
 def adapt_rc_dab_control(
