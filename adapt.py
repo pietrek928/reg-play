@@ -212,6 +212,16 @@ def run_dab_rc_sim_lookback(
     return stack_values(state_history), stack_values(output_history)
 
 
+def run_dab_rc_sim_batch(
+        model: SymBlock, input_data: ValuesRec, model_state: ValuesRec
+):
+    model_state, outputs = model.compute_step(
+        merge_values(input_data, model_state)
+    )
+
+    return model_state, outputs
+
+
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,

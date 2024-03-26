@@ -197,7 +197,10 @@ class TestDABReg(SymBlock):
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
 
-        self.lstm = LSTM(5, n_lstm, num_layers=lstm_layers, batch_first=True)
+        self.lstm = LSTM(
+            input_size=5, hidden_size=n_lstm, num_layers=lstm_layers,
+            batch_first=True
+        )
         self.model = Sequential(
             LinearBlock(n_lstm, n),
             # AlphaDropout(0.04),
@@ -229,7 +232,7 @@ class TestDABReg(SymBlock):
             inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
             inputs['lstm_state_2'].transpose(0, 1).contiguous()
         ))
-        model_out = self.model.forward(lstm_out.squeeze(-2))
+        model_out = self.model.forward(lstm_out)
 
         fi_v = model_out[..., 0:1]
         return dict(
