@@ -1,7 +1,8 @@
 from math import exp
 from random import randint, uniform
-from typing import Callable, Dict, Any, Tuple
+from typing import Callable, Dict, Any, Iterable, Tuple
 
+from torch import Tensor, stack
 from torch.optim import Adamax, SGD, Adam, AdamW, ASGD, Rprop, RMSprop, NAdam, Adagrad, Adadelta
 from torch.nn.utils import clip_grad_norm_, clip_grad_value_
 
@@ -212,20 +213,25 @@ def run_dab_rc_sim_lookback(
     return stack_values(state_history), stack_values(output_history)
 
 
-def run_dab_rc_sim_batch(
-        model: SymBlock, input_data: ValuesRec, model_state: ValuesRec
-):
-    model_state, outputs = model.compute_step(
-        merge_values(input_data, model_state)
-    )
+# def run_dab_rc_sim_batch(
+#         model: SymBlock, input_data: ValuesRec, model_state: ValuesRec,
+#         batch_size: int
+# ):
+#     model_state, outputs = model.compute_step(
+#         merge_values(input_data, model_state)
+#     )
 
-    return model_state, outputs
+#     return model_state, outputs
+
+
+def mean_tensors(tensors: Iterable[Tensor]) -> Tensor:
+    return stack(tuple(tensors)).mean(dim=0)
 
 
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
-        time_batch_size=128, case_batch_size=int(2 ** 12), device=None
+        seq_time_size=2, time_batch_size=64, case_batch_size=int(2 ** 12), device=None
 ):
     model.to(device)
     model.train()
@@ -252,7 +258,7 @@ def adapt_rc_dab_reg(
 
     # AdamW ?
     # Adamax +
-    lstm_loss_div = 72
+    lstm_loss_div = 16
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
     ), **get_step_params(model_lr, step))
@@ -270,6 +276,10 @@ def adapt_rc_dab_reg(
         for time_batch_pos in range(0, dataset_shape_prefix[0], time_batch_size):
             dataset_time_batch = get_range(dataset, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
             model_states_time_batch = get_range(model_states, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
+            seq_batch_size = time_batch_size - seq_time_size
+            if seq_batch_size < 1:
+                continue
+
             for case_batch_pos in range(0, dataset_shape_prefix[1], case_batch_size):
                 dataset_case_batch = get_range(dataset_time_batch, case_batch_pos, case_batch_pos + case_batch_size, dim=1)
                 model_states_case_batch = get_range(model_states_time_batch, case_batch_pos, case_batch_pos + case_batch_size, dim=1)
@@ -277,30 +287,40 @@ def adapt_rc_dab_reg(
                 optimizer_reg.zero_grad()
                 optimizer_lstm.zero_grad()
 
-                # start = 0
-                # start = randint(0, dataset_shape_prefix[0] - steps_count - 1)
-                # start = start_pos
-                # end = start + steps_count
-                # model_inputs = get_range(dataset, start, end)
+                outputs = get_range(dataset_case_batch, 0, seq_batch_size)
 
-                new_states, outputs = run_dab_rc_sim(
-                    # FIXME: why detach needed ???
-                    model, dataset_case_batch, detach_values(
-                        get_at_pos(model_states_case_batch, 0)
+                loss_guides = []
+                loss_means = []
+                loss_maxes = []
+                for seq_t in range(0, seq_time_size):
+                    step_data_batch = get_range(dataset_case_batch, seq_t, seq_t + seq_batch_size, dim=0)
+                    model_state_step = get_at_pos(model_states_case_batch, seq_t, dim=0)
+                    _, outputs = model.compute_step(
+                        merge_values(model_state_step, outputs, step_data_batch)
                     )
-                )
+                    # new_states, outputs = run_dab_rc_sim(
+                    #     # FIXME: why detach needed ???
+                    #     model, dataset_case_batch, detach_values(
+                    #         get_at_pos(model_states_case_batch, 0)
+                    #     )
+                    # )
+                    # TODO: loss ramp for sequence beginning
+                    loss_guides.append(mean_tensors(
+                        (outputs[k] - step_data_batch[k]).abs().mean() for k in guide_keys
+                    ))
 
-                loss_guide = sum(
-                    (outputs[k] - dataset_case_batch[k]).abs().mean() for k in guide_keys
-                )
-                loss = loss_func(outputs, dataset_case_batch)
+                    loss = loss_func(outputs, step_data_batch)
 
-                loss_mean = loss.mean()
-                loss_max = loss.max()
+                    loss_means.append(loss.mean())
+                    loss_maxes.append(loss.max())
+                loss_guide = mean_tensors(loss_guides)
+                loss_mean = mean_tensors(loss_means)
+                loss_max = mean_tensors(loss_maxes)
 
-                # (loss_max * uniform(.001, .005) + loss_mean).backward()
-                loss_guide.backward()
+                (loss_max * uniform(.001, .005) + loss_mean).backward()
+                # loss_guide.backward()
                 # loss_mean.backward()
+
                 loss_mean = float(loss_mean)
                 loss_max = float(loss_max)
                 loss_guide = float(loss_guide)

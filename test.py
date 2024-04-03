@@ -261,6 +261,7 @@ def show_optimized_control():
     print(f'loss={float(dab_rc_control_loss_func(data, data).mean())}')
     for _ in range(16):
         n = randrange(0, 3006)
+        # dims are time, case, ...
         plot_time_graphs(get_at_pos(data, n, dim=1), ('VIN', 'VOUT_set', 'VOUT', 'R', 'C', 'iout', 'fi_reg'))
 
 

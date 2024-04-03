@@ -192,14 +192,16 @@ class TestDABReg(SymBlock):
 
         lstm_layers = 2
         n_lstm = 32
-        n = 64
+        n = 128
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
 
         self.lstm = LSTM(
-            input_size=5, hidden_size=n_lstm, num_layers=lstm_layers,
-            batch_first=True
+            input_size=4, hidden_size=n_lstm, num_layers=lstm_layers,
+        )
+        self.bypass = Sequential(
+            LinearBlock(4, n_lstm),
         )
         self.model = Sequential(
             LinearBlock(n_lstm, n),
@@ -228,11 +230,17 @@ class TestDABReg(SymBlock):
         lstm_in = assemble_inputs(
             inputs, ('VIN', 'VOUT', 'VOUT_set', 'f')
         )
-        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, (
-            inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
-            inputs['lstm_state_2'].transpose(0, 1).contiguous()
-        ))
-        model_out = self.model.forward(lstm_out)
+        if 'lstm_state_1' in inputs and 'lstm_state_2' in inputs:
+            lstm_state_input = (
+                inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
+                inputs['lstm_state_2'].transpose(0, 1).contiguous()
+            )
+        else:
+            lstm_state_input = None
+        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, lstm_state_input)
+        lstm_out_shape = lstm_out.shape
+        model_in = lstm_out.view(-1, lstm_out_shape[-1]) + self.bypass.forward(lstm_in.view(-1, lstm_in.shape[-1]))
+        model_out = (self.model.forward(model_in)).view(*lstm_out_shape[:-1], -1)
 
         fi_v = model_out[..., 0:1]
         return dict(
