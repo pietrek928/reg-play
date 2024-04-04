@@ -190,7 +190,7 @@ class TestDABReg(SymBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        lstm_layers = 2
+        lstm_layers = 1
         n_lstm = 32
         n = 128
 

@@ -231,7 +231,7 @@ def mean_tensors(tensors: Iterable[Tensor]) -> Tensor:
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
-        seq_time_size=2, time_batch_size=64, case_batch_size=int(2 ** 12), device=None
+        seq_time_size=1, time_batch_size=256, case_batch_size=int(2 ** 12), device=None
 ):
     model.to(device)
     model.train()
@@ -254,7 +254,7 @@ def adapt_rc_dab_reg(
 
     step = 0
 
-    model_lr = 1e-3
+    model_lr = 1e-5
 
     # AdamW ?
     # Adamax +
@@ -276,7 +276,7 @@ def adapt_rc_dab_reg(
         for time_batch_pos in range(0, dataset_shape_prefix[0], time_batch_size):
             dataset_time_batch = get_range(dataset, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
             model_states_time_batch = get_range(model_states, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
-            seq_batch_size = time_batch_size - seq_time_size
+            seq_batch_size = time_batch_size - seq_time_size + 1
             if seq_batch_size < 1:
                 continue
 
