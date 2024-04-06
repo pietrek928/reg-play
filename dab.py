@@ -191,33 +191,34 @@ class TestDABReg(SymBlock):
         super().__init__(*args, **kwargs)
 
         lstm_layers = 1
-        n_lstm = 32
+        lstm_in_size = 16
+        n_lstm = 64
         n = 128
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
 
+        self.input_transform = LinearBlock(4, lstm_in_size)
         self.lstm = LSTM(
-            input_size=4, hidden_size=n_lstm, num_layers=lstm_layers,
+            input_size=lstm_in_size, hidden_size=n_lstm, num_layers=lstm_layers,
         )
-        self.bypass = Sequential(
-            LinearBlock(4, n_lstm),
-        )
-        self.model = Sequential(
-            LinearBlock(n_lstm, n),
-            # AlphaDropout(0.04),
-            ResidualSequential(
-                LinearBlock(n, n),
-                LinearBlock(n, n),
-                LinearBlock(n, n),
-                LinearBlock(n, n),
-                # LinearBlock(n, n),
-                # LinearBlock(n, n),
-            ),
-            # AlphaDropout(0.04),
-            LinearBlock(n, n),
-            Linear(n, 2),
-        )
+        self.bypass = LinearBlock(lstm_in_size, n_lstm)
+        # self.model = Sequential(
+        #     # LinearBlock(n_lstm, n),
+        #     # # AlphaDropout(0.04),
+        #     # ResidualSequential(
+        #     #     LinearBlock(n, n),
+        #     #     LinearBlock(n, n),
+        #     #     LinearBlock(n, n),
+        #     #     LinearBlock(n, n),
+        #     #     # LinearBlock(n, n),
+        #     #     # LinearBlock(n, n),
+        #     # ),
+        #     # # AlphaDropout(0.04),
+        #     # LinearBlock(n, n),
+        #     # Linear(n, 1),
+        # )
+        self.model = LinearBlock(n_lstm, 1)
 
     # Model gets sequence part as input
     def compute_step(
@@ -227,9 +228,11 @@ class TestDABReg(SymBlock):
         # e_I = (inputs['e_I'] + e / inputs['f']).tanh()
         # e_I = inputs['e_I']
 
-        lstm_in = assemble_inputs(
+        in_tensor = assemble_inputs(
             inputs, ('VIN', 'VOUT', 'VOUT_set', 'f')
         )
+        in_tensor_shape = in_tensor.shape
+        lstm_in = self.input_transform.forward(in_tensor.view(-1, in_tensor.shape[-1]))
         if 'lstm_state_1' in inputs and 'lstm_state_2' in inputs:
             lstm_state_input = (
                 inputs['lstm_state_1'].transpose(0, 1).contiguous(),  # batch as second dim
@@ -237,10 +240,13 @@ class TestDABReg(SymBlock):
             )
         else:
             lstm_state_input = None
-        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm(lstm_in, lstm_state_input)
+        lstm_out, (lstm_state_1, lstm_state_2) = self.lstm.forward(
+            lstm_in.view(*in_tensor_shape[:-1], -1), lstm_state_input
+        )
+
         lstm_out_shape = lstm_out.shape
-        model_in = lstm_out.view(-1, lstm_out_shape[-1]) + self.bypass.forward(lstm_in.view(-1, lstm_in.shape[-1]))
-        model_out = (self.model.forward(model_in)).view(*lstm_out_shape[:-1], -1)
+        model_in = lstm_out.view(-1, lstm_out_shape[-1]) + self.bypass.forward(lstm_in)
+        model_out = self.model.forward(model_in).view(*lstm_out_shape[:-1], -1)
 
         fi_v = model_out[..., 0:1]
         return dict(

@@ -1,17 +1,15 @@
 from math import exp
-from random import randint, uniform
+from random import randrange, uniform
 from typing import Callable, Dict, Any, Iterable, Tuple
 
 from torch import Tensor, stack
-from torch.optim import Adamax, SGD, Adam, AdamW, ASGD, Rprop, RMSprop, NAdam, Adagrad, Adadelta
-from torch.nn.utils import clip_grad_norm_, clip_grad_value_
+from torch.optim import Adamax, AdamW
 
 from grad import sum_vals, GradVar
 from model import ValuesRec, validate_values, init_zero_params, init_torch_models, get_parameters, SymBlock, init_zero_values
 from named_tensor import NamedTensor
 from obj import Block, Tm
-from utils import detach_values, extract_params, get_at_pos, get_range, get_shapes, set_range, values_to, stack_values, merge_values
-from vis import plot_time_graphs
+from utils import extract_params, get_at_pos, get_range, values_to, stack_values, merge_values
 
 
 def set_optimizer_params(optimizer, new_params):
@@ -19,16 +17,16 @@ def set_optimizer_params(optimizer, new_params):
         param_group.update(new_params)
 
 
-def get_step_params(lr, step):
-    lr *= exp(-step / 100)
+def get_step_params(lr, epoch):
+    lr *= exp(-epoch / 200)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
     )
 
 
-def get_control_step_params(lr, step):
-    lr *= exp(-step / 100)
+def get_control_step_params(lr, epoch):
+    lr *= exp(-epoch / 100)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -94,7 +92,7 @@ def adapt_model(
 
     history_size = model.history_size
 
-    # step = 0
+    # epoch = 0
     try:
         while True:  # Training loop
             optimizer_params.zero_grad()
@@ -104,13 +102,13 @@ def adapt_model(
 
             dataset_steps = tuple(
                 {
-                    k: v[step] for k, v in dataset.items()
-                } for step in range(history_size)
+                    k: v[epoch] for k, v in dataset.items()
+                } for epoch in range(history_size)
             )
 
-            for step in range(history_size - 1, steps_count):  # Model simulation loop
+            for epoch in range(history_size - 1, steps_count):  # Model simulation loop
                 dataset_steps = dataset_steps[1:] + ({
-                                                         k: v[step] for k, v in dataset.items()
+                                                         k: v[epoch] for k, v in dataset.items()
                                                      },)
                 state, outputs = model.compute_step(params, torch_models, dataset_steps, dataset_steps[:-1])
                 # state = detach_values(state)  # ???????????
@@ -119,7 +117,7 @@ def adapt_model(
                     loss = loss_func(outputs, dataset_steps[-1])
                 else:
                     loss += loss_func(outputs, dataset_steps[-1])
-                # if step:
+                # if epoch:
                 #     loss += loss_step
                 #     if not (float(loss) < target_loss * 5.):
                 #         break
@@ -134,17 +132,17 @@ def adapt_model(
             # ).abs() * .004
 
             loss.backward()
-            optimizer_params.step()
-            # optimizer_start_states.step()
+            optimizer_params.epoch()
+            # optimizer_start_states.epoch()
 
             loss = float(loss)
-            # print(f'{step + 1}/{steps_count} loss={loss}')
+            # print(f'{epoch + 1}/{steps_count} loss={loss}')
             print(f'loss={loss}')
 
             set_optimizer_params(optimizer_params, get_step_params(model_lr * loss))
-            # set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * loss / (step + 1) ** 2.3))
+            # set_optimizer_params(optimizer_start_states, get_step_params(start_states_lr * loss / (epoch + 1) ** 2.3))
 
-            # if loss < target_loss and step + 1 == steps_count:
+            # if loss < target_loss and epoch + 1 == steps_count:
             if loss < target_loss:
                 break
 
@@ -162,8 +160,8 @@ def run_dab_rc_sim(
     state_history = [model_state]
 
     steps_count = input_data[next(iter(input_data.keys()))].shape[0]
-    for step in range(steps_count):
-        model_inputs = get_at_pos(input_data, step)
+    for epoch in range(steps_count):
+        model_inputs = get_at_pos(input_data, epoch)
 
         # cut gradients
         # model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
@@ -196,8 +194,8 @@ def run_dab_rc_sim_lookback(
     state_history.append(model_state)
 
     steps_count = input_data[next(iter(input_data.keys()))].shape[0]
-    for step in range(lookback_size, steps_count):
-        model_inputs = get_range(input_data, step, step + 1)
+    for epoch in range(lookback_size, steps_count):
+        model_inputs = get_range(input_data, epoch, epoch + 1)
 
         # cut gradients
         # model_state = model_state | dict(VOUT=model_state['VOUT'].detach())
@@ -231,7 +229,7 @@ def mean_tensors(tensors: Iterable[Tensor]) -> Tensor:
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
-        seq_time_size=1, time_batch_size=256, case_batch_size=int(2 ** 12), device=None
+        seq_time_size=128, time_batch_size=int(2 ** 8), case_batch_size=int(2 ** 6), device=None
 ):
     model.to(device)
     model.train()
@@ -252,19 +250,19 @@ def adapt_rc_dab_reg(
     )
     # model_states = merge_values(model_states, init_state)
 
-    step = 0
+    epoch = 0
 
-    model_lr = 1e-5
+    model_lr = 4e-2
 
     # AdamW ?
     # Adamax +
-    lstm_loss_div = 16
+    lstm_loss_div = 8
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
-    ), **get_step_params(model_lr, step))
+    ), **get_step_params(model_lr, epoch))
     optimizer_lstm = AdamW(tuple(
         p for n, p in model.named_parameters() if 'lstm' in n
-    ), **get_step_params(model_lr / lstm_loss_div, step))
+    ), **get_step_params(model_lr / lstm_loss_div, epoch))
 
     # start_pos = 0
 
@@ -272,11 +270,15 @@ def adapt_rc_dab_reg(
     last_mean_loss = 0.
     max_stuck_count = 0
     while True:  # Training loop
-        step += 1
-        for time_batch_pos in range(0, dataset_shape_prefix[0], time_batch_size):
+        epoch += 1
+        epoch_loss_means = []
+        epoch_loss_maxes = []
+        epoch_loss_guides = []
+    
+        for time_batch_pos in range(randrange(time_batch_size), dataset_shape_prefix[0], time_batch_size):
             dataset_time_batch = get_range(dataset, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
             model_states_time_batch = get_range(model_states, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
-            seq_batch_size = time_batch_size - seq_time_size + 1
+            seq_batch_size = next(iter(dataset_time_batch.values())).shape[0] - seq_time_size + 1
             if seq_batch_size < 1:
                 continue
 
@@ -317,13 +319,17 @@ def adapt_rc_dab_reg(
                 loss_mean = mean_tensors(loss_means)
                 loss_max = mean_tensors(loss_maxes)
 
-                (loss_max * uniform(.001, .005) + loss_mean).backward()
+                # (loss_max * uniform(.001, .005) + loss_mean).backward()
+                (loss_max * uniform(.001, .005) + loss_mean + loss_guide * .04).backward()
                 # loss_guide.backward()
                 # loss_mean.backward()
 
                 loss_mean = float(loss_mean)
                 loss_max = float(loss_max)
                 loss_guide = float(loss_guide)
+                epoch_loss_means.append(loss_mean)
+                epoch_loss_maxes.append(loss_max)
+                epoch_loss_guides.append(loss_guide)
                 if abs(loss_max - last_max_loss) < 1e-6:
                     max_stuck_count += 1
                 else:
@@ -338,15 +344,12 @@ def adapt_rc_dab_reg(
 
                 # clip_grad_norm_(model.parameters(), clip_value=1.0)
                 # clip_grad_value_(model.parameters(), clip_value=1.0)
-                loss_params = get_step_params(model_lr, step)
                 if not bad_loss:
                     # set_range(model_states, start+1, detach_values(new_states))
                     optimizer_reg.step()
                     optimizer_lstm.step()
-                    set_optimizer_params(optimizer_reg, loss_params)
-                    set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
 
-                print(f'step={step} loss_guide={loss_guide} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
+                # print(f'   epoch={epoch} loss_guide={loss_guide} loss_mean={loss_mean} loss_max={loss_max} lr={loss_params["lr"]} bad_loss={bad_loss}')
 
                 # start_pos += steps_count
                 # if start_pos >= dataset_shape_prefix[0] - steps_count - 1:
@@ -365,6 +368,17 @@ def adapt_rc_dab_reg(
                 #         steps_count -= 1
                 #     # else:
                 #         # break
+        loss_params = get_step_params(model_lr, epoch)
+        set_optimizer_params(optimizer_reg, loss_params)
+        set_optimizer_params(optimizer_lstm, get_step_params(model_lr / lstm_loss_div, 1))
+        
+        print(
+            f'epoch={epoch} '
+            f'loss_guide={sum(epoch_loss_guides) / len(epoch_loss_guides)} '
+            f'loss_mean={sum(epoch_loss_means) / len(epoch_loss_means)} '
+            f'loss_max={sum(epoch_loss_maxes) / len(epoch_loss_maxes)} '
+            f'lr={loss_params["lr"]}'
+        )
 
 
 def adapt_rc_dab_control(
@@ -394,14 +408,14 @@ def adapt_rc_dab_control(
 
     case_count = dataset_shape_prefix[1]
     batch_size = 256
-    step = 0
+    epoch = 0
 
     model_lr = 1e-1
 
     # AdamW +
     # Adamax ++
     optimizer_controls = AdamW(
-        tuple(controls.values()), **get_control_step_params(model_lr, step), betas=(.85, .995)
+        tuple(controls.values()), **get_control_step_params(model_lr, epoch), betas=(.85, .995)
     )
 
     try:
@@ -428,14 +442,14 @@ def adapt_rc_dab_control(
                 losses_mean.append(float(loss_mean))
                 losses_max.append(float(loss_max))
 
-            optimizer_controls.step()
-            train_params = get_control_step_params(model_lr, step)
+            optimizer_controls.epoch()
+            train_params = get_control_step_params(model_lr, epoch)
             set_optimizer_params(optimizer_controls, train_params)
-            step += 1
+            epoch += 1
 
             loss_mean = sum(losses_mean) / len(losses_mean)
             loss_max = sum(losses_max) / len(losses_max)
-            print(f'step={step} loss_mean={loss_mean} loss_max={loss_max} lr={train_params["lr"]}')
+            print(f'epoch={epoch} loss_mean={loss_mean} loss_max={loss_max} lr={train_params["lr"]}')
     
     except KeyboardInterrupt:
         pass
