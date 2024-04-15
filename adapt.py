@@ -26,7 +26,7 @@ def get_step_params(lr, epoch):
 
 
 def get_control_step_params(lr, epoch):
-    lr *= exp(-epoch / 100)
+    lr *= exp(-epoch / 200)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -171,8 +171,8 @@ def run_dab_rc_sim(
         )
         # print('??????????', tuple(model_state.keys()))
         # print('??????????', tuple(model_state['reg_model'].keys()))
-        model_state['VOUT'] = model_state['VOUT'].detach()
-        model_state['reg_model']['e_I'] = model_state['reg_model']['e_I'].detach()
+        # model_state['VOUT'] = model_state['VOUT'].detach()
+        # model_state['reg_model']['e_I'] = model_state['reg_model']['e_I'].detach()
         state_history.append(model_state)
         output_history.append(outputs)
 
@@ -229,7 +229,7 @@ def mean_tensors(tensors: Iterable[Tensor]) -> Tensor:
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
-        seq_time_size=128, time_batch_size=int(2 ** 8), case_batch_size=int(2 ** 6), device=None
+        seq_time_size=int(2 ** 6), time_batch_size=int(2 ** 7), case_batch_size=int(2 ** 6), device=None
 ):
     model.to(device)
     model.train()
@@ -252,7 +252,7 @@ def adapt_rc_dab_reg(
 
     epoch = 0
 
-    model_lr = 4e-2
+    model_lr = 7e-2
 
     # AdamW ?
     # Adamax +
@@ -442,7 +442,7 @@ def adapt_rc_dab_control(
                 losses_mean.append(float(loss_mean))
                 losses_max.append(float(loss_max))
 
-            optimizer_controls.epoch()
+            optimizer_controls.step()
             train_params = get_control_step_params(model_lr, epoch)
             set_optimizer_params(optimizer_controls, train_params)
             epoch += 1

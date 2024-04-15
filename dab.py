@@ -190,7 +190,7 @@ class TestDABReg(SymBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        lstm_layers = 1
+        lstm_layers = 2
         lstm_in_size = 16
         n_lstm = 64
         n = 128
@@ -218,7 +218,14 @@ class TestDABReg(SymBlock):
         #     # LinearBlock(n, n),
         #     # Linear(n, 1),
         # )
-        self.model = LinearBlock(n_lstm, 1)
+        self.model = Sequential(
+            LinearBlock(n_lstm, n),
+            ResidualSequential(
+                LinearBlock(n, n),
+                LinearBlock(n, n),
+            ),
+            Linear(n, 1)
+        )
 
     # Model gets sequence part as input
     def compute_step(
@@ -295,7 +302,7 @@ class DABRCModel(SymBlock):
         dab_state, dab_outputs = self.dab_model.compute_step(
             inputs | dict(
                 fi=fi_guide,  # !!!!!!!!!!!!!
-                Leq=25e-6, nt=.24,
+                Leq=25e-6, nt=1.  # nt=.24,
             )
         )
 
@@ -344,7 +351,7 @@ class DABRCOptimModel(SymBlock):
         _, dab_outputs = self.dab_model.compute_step(
             inputs | dict(
                 fi=inputs['fi_reg'].tanh() * .5,
-                Leq=25e-6, nt=.36,
+                Leq=25e-6, nt=1. # nt=.36,
             )
         )
 
