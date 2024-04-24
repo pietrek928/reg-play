@@ -190,10 +190,10 @@ class TestDABReg(SymBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        lstm_layers = 2
-        lstm_in_size = 16
+        lstm_layers = 1
+        lstm_in_size = 32
         n_lstm = 64
-        n = 128
+        n = 64
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
@@ -224,6 +224,7 @@ class TestDABReg(SymBlock):
                 LinearBlock(n, n),
                 LinearBlock(n, n),
             ),
+            LinearBlock(n, n),
             Linear(n, 1)
         )
 

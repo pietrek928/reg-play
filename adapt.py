@@ -1,5 +1,5 @@
 from math import exp
-from random import randrange, uniform
+from random import randrange, shuffle, uniform
 from typing import Callable, Dict, Any, Iterable, Tuple
 
 from torch import Tensor, stack
@@ -18,7 +18,7 @@ def set_optimizer_params(optimizer, new_params):
 
 
 def get_step_params(lr, epoch):
-    lr *= exp(-epoch / 200)
+    lr *= exp(-epoch / 70)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -229,7 +229,7 @@ def mean_tensors(tensors: Iterable[Tensor]) -> Tensor:
 def adapt_rc_dab_reg(
         model: SymBlock, dataset: Dict[str, Any], loss_func,
         guide_keys: Tuple[str, ...], target_steps_count, target_loss: float,
-        seq_time_size=int(2 ** 6), time_batch_size=int(2 ** 7), case_batch_size=int(2 ** 6), device=None
+        seq_time_size=int(2 ** 5), time_batch_size=int(2 ** 7), case_batch_size=int(2 ** 6), device=None
 ):
     model.to(device)
     model.train()
@@ -252,11 +252,11 @@ def adapt_rc_dab_reg(
 
     epoch = 0
 
-    model_lr = 7e-2
+    model_lr = 1e-4  # 1e-5 ?
 
     # AdamW ?
     # Adamax +
-    lstm_loss_div = 8
+    lstm_loss_div = 3
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
     ), **get_step_params(model_lr, epoch))
@@ -275,7 +275,9 @@ def adapt_rc_dab_reg(
         epoch_loss_maxes = []
         epoch_loss_guides = []
     
-        for time_batch_pos in range(randrange(time_batch_size), dataset_shape_prefix[0], time_batch_size):
+        time_batch_indexes = list(range(randrange(time_batch_size), dataset_shape_prefix[0], time_batch_size))
+        shuffle(time_batch_indexes)
+        for time_batch_pos in time_batch_indexes:
             dataset_time_batch = get_range(dataset, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
             model_states_time_batch = get_range(model_states, time_batch_pos, time_batch_pos + time_batch_size, dim=0)
             seq_batch_size = next(iter(dataset_time_batch.values())).shape[0] - seq_time_size + 1
