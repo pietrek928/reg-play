@@ -191,14 +191,22 @@ class TestDABReg(SymBlock):
         super().__init__(*args, **kwargs)
 
         lstm_layers = 1
-        lstm_in_size = 32
+        lstm_in_size = 64
         n_lstm = 64
-        n = 64
+        n = 128
 
         self.lstm_state_1 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
         self.lstm_state_2 = StateValue(shape=(lstm_layers, n_lstm), descr='DAB regulator internal state')
 
-        self.input_transform = LinearBlock(4, lstm_in_size)
+        self.input_transform = Sequential(
+            LinearBlock(4, lstm_in_size),
+            ResidualSequential(
+                LinearBlock(lstm_in_size, lstm_in_size),
+                LinearBlock(lstm_in_size, lstm_in_size),
+                LinearBlock(lstm_in_size, lstm_in_size),
+                LinearBlock(lstm_in_size, lstm_in_size),
+            ),
+        )
         self.lstm = LSTM(
             input_size=lstm_in_size, hidden_size=n_lstm, num_layers=lstm_layers,
         )
@@ -221,6 +229,8 @@ class TestDABReg(SymBlock):
         self.model = Sequential(
             LinearBlock(n_lstm, n),
             ResidualSequential(
+                LinearBlock(n, n),
+                LinearBlock(n, n),
                 LinearBlock(n, n),
                 LinearBlock(n, n),
             ),

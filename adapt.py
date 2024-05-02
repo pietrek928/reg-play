@@ -18,7 +18,7 @@ def set_optimizer_params(optimizer, new_params):
 
 
 def get_step_params(lr, epoch):
-    lr *= exp(-epoch / 70)
+    lr *= exp(-epoch / 250)
     return dict(
         lr=lr,
         weight_decay=lr * 1e-3,
@@ -252,11 +252,11 @@ def adapt_rc_dab_reg(
 
     epoch = 0
 
-    model_lr = 1e-4  # 1e-5 ?
+    model_lr = 5e-4
 
     # AdamW ?
     # Adamax +
-    lstm_loss_div = 3
+    lstm_loss_div = 32
     optimizer_reg = Adamax(tuple(
         p for n, p in model.named_parameters() if 'lstm' not in n
     ), **get_step_params(model_lr, epoch))
