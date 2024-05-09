@@ -269,12 +269,33 @@ def optimize_test_dab():
     import torch
     device = default_device()
     data = torch.load(path.join(DATASET_PATH, 'controls.pt'), map_location=device)
+    model = DABRCModel()
 
     # for k, v in model_input.items():
     #     print(k, tuple(v[it].mean() for it in range(50)))
     data['fi_guide'] = data['fi_reg']
-    adapt_rc_dab_reg(DABRCModel(), data, dab_rc_loss_func, ('fi_reg', ), 150, 150., device=default_device())
-    # adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
+    try:
+        adapt_rc_dab_reg(model, data, dab_rc_loss_func, ('fi_reg', ), 150, 150., device=default_device())
+        # adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
+    finally:
+        torch.save(model.reg_model, path.join(DATASET_PATH, 'reg-model.pt'))
+
+
+def sym_test_dab_reg():
+    import torch
+    with torch.nograd():
+        device = default_device()
+        data = torch.load(path.join(DATASET_PATH, 'controls.pt'), map_location=device)
+        data.pop('fi_reg', None)
+
+        model = DABRCModel()
+        model.eval()
+        checkpoint = torch.load(path.join(DATASET_PATH, 'reg-model.pt'), map_location='cpu')
+        model.reg_model.load_state_dict(checkpoint)
+        model.to(device)
+
+        computed_params = compute_rc_dab_sym_params(model, data, device=device)
+        torch.save(merge_values(data, computed_params), path.join(DATASET_PATH, 'model-sim.pt'))
 
 
 if __name__ == '__main__':
