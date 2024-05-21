@@ -278,12 +278,13 @@ def optimize_test_dab():
         adapt_rc_dab_reg(model, data, dab_rc_loss_func, ('fi_reg', ), 150, 150., device=default_device())
         # adapt_rc_dab_control(DABRCOptimModel(), model_input, dab_rc_control_loss_func, ('fi_reg', ), device=default_device())
     finally:
-        torch.save(model.reg_model, path.join(DATASET_PATH, 'reg-model.pt'))
+        print('Saving model...')
+        torch.save(model.reg_model.state_dict(), path.join(DATASET_PATH, 'reg-model.pt'))
 
 
-def sym_test_dab_reg():
+def sim_test_dab_reg():
     import torch
-    with torch.nograd():
+    with torch.no_grad():
         device = default_device()
         data = torch.load(path.join(DATASET_PATH, 'controls.pt'), map_location=device)
         data.pop('fi_reg', None)

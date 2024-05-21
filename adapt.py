@@ -409,7 +409,7 @@ def adapt_rc_dab_control(
     )
 
     case_count = dataset_shape_prefix[1]
-    batch_size = 256
+    batch_size = 1024
     epoch = 0
 
     model_lr = 1e-1
