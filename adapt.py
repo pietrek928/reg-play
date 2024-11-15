@@ -471,6 +471,7 @@ def compute_rc_dab_sym_params(model: SymBlock, dataset: ValuesRec, device=None):
     model_states = init_zero_values(
         model.get_state(), base_shape=dataset_shape_prefix[1:], device=device
     )
+    print('???????????', model_states['reg_model']['lstm_state_1'].shape)
     new_states, outputs = run_dab_rc_sim(
         model, dataset, model_states
     )
