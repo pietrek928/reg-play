@@ -52,6 +52,32 @@ def accum_drot(drot):
     return torch.cat([init_angle, rot], dim=-1)
 
 
+def segment_distance(S, P):
+    # Unpack segment endpoints
+    A, B = S[:-1, :], S[1:, :]
+
+    # Vector from segment start to end
+    seg_vec = B - A
+
+    # Vector from segment start to points
+    point_vec = P.unsqueeze(1) - A.unsqueeze(0)  # Shape (N, M, 2)
+
+    # Project point_vec onto seg_vec
+    seg_len_squared = (seg_vec ** 2).sum(dim=1)  # Shape (M,)
+    t = (point_vec * seg_vec.unsqueeze(0)).sum(dim=2) / seg_len_squared.unsqueeze(0)  # Shape (N, M)
+
+    # Clamp t to the range [0, 1]
+    t = torch.clamp(t, 0, 1)
+
+    # Find the closest point on the segment to the point
+    closest_point = A.unsqueeze(0) + t.unsqueeze(2) * seg_vec.unsqueeze(0)  # Shape (N, M, 2)
+
+    # Compute the distance from the point to the closest point on the segment
+    distance = torch.norm(P.unsqueeze(1) - closest_point, dim=2).amin(dim=1)  # Shape (N, M)
+
+    return distance
+
+
 # dims: (sample, time)
 def score_sim_fit(
         step_func, score_func, state: Dict[str, torch.Tensor],
