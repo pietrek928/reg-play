@@ -163,6 +163,15 @@ def prepare_lf_data(fname, device='cpu'):
     drot_r = -compute_drot(angle_r)
     rot_r = accum_drot(drot_r)
 
+    # Wheel R=2cm, wheels distance d=15cm
+    d_l = rot_l * .02
+    d_r = rot_r * .02
+    ddist = (d_l + d_r) * .5
+    drot = (d_l - d_r) * (1 / .15)
+    rot = torch.cumsum(drot, -1)
+    x = torch.cumsum(ddist * rot.cos(), -1)
+    y = torch.cumsum(ddist * rot.sin(), -1)
+
     return dict(
         dt=dt,
         t=t,
@@ -178,6 +187,8 @@ def prepare_lf_data(fname, device='cpu'):
         u_r=torch.from_numpy(df['motor_r_u'].to_numpy()).to(
             dtype=torch.float64, device=device
         ).unsqueeze(0),
+        x=x,
+        y=y
     )
 
 
