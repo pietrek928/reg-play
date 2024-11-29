@@ -1,5 +1,7 @@
 from gc import collect
+from sys import argv
 from typing import Dict, Tuple
+from click import command, option
 import torch
 
 
@@ -22,10 +24,10 @@ class LFModelSimple:
         am1 = torch.where(am1 > 0, (am1 - p[:, 4]).clamp(min=0), (am1 + p[:, 4]).clamp(max=0))
 
         am2 = p[:, 3]*(u2 - p[:, 2]*v2)
-        am2 = torch.where(am2 > 0, (am2 - p[:, 4]).clamp(min=0), (am2 + p[:, 4]).clamp(max=0))
+        am2 = torch.where(am2 > 0, (am2 - p[:, 5]).clamp(min=0), (am2 + p[:, 5]).clamp(max=0))
 
         dv = am1 + am2
-        dw = p[:, 5] * (am1 - am2)
+        dw = p[:, 6] * (am1 - am2)
         return {
             'v': dv,
             'w': dw,
@@ -35,6 +37,41 @@ class LFModelSimple:
             'dl': v1,
             'dr': v2
         }
+
+
+def _unflatten_matrix(data: torch.Tensor, x, y):
+    s = data.shape
+    return data.view(*s[:-1], x, y)
+
+
+class LFReg:
+    def __init__(self, params):
+        self.params = params
+
+    def compute_step(self, data):
+        A = _unflatten_matrix(self.params[..., :16], 4, 4)
+        B = _unflatten_matrix(self.params[..., 16:32], 4, 4)
+        C = _unflatten_matrix(self.params[..., 32:40], 2, 4)
+        D = _unflatten_matrix(self.params[..., 40:48], 2, 4)
+
+        state = data['state']
+        dt = data['dt']
+        drot_l = data['drot_l']
+        drot_r = data['drot_r']
+        line_pos = data['line_pos']
+        line_pos_last = data['line_pos_last']
+
+        u = torch.stack([
+            drot_l,
+            # drot_l / dt,
+            drot_r,
+            # drot_r / dt,
+            line_pos,
+            (line_pos - line_pos_last) / dt,
+        ], dim=-1)
+
+        state = state + A * state + B * u
+        y = C * state + D * u
 
 
 # transform angles tensor to drot
@@ -265,10 +302,10 @@ def plot_lf_case(case_num, data, data_sim=None):
 
 def score_lf_fit(state_gt, state_sim):
     return (
-        # (state_gt['dl'] - state_sim['dl']) ** 2.
-        # + (state_gt['dr'] - state_sim['dr']) ** 2.
-        (state_gt['x'] - state_sim['x']).abs()
-        + (state_gt['y'] - state_sim['y']).abs()
+        ((state_gt['dl'] - state_sim['dl']) ** 2.
+        + (state_gt['dr'] - state_sim['dr']) ** 2.) * .001
+        + (state_gt['x'] - state_sim['x']) ** 2.
+        + (state_gt['y'] - state_sim['y']) ** 2.
     )
 
 
@@ -276,7 +313,7 @@ def validate_lf_params(params):
     return torch.all(params > 0, dim=-1)
 
 
-def score_points(params):
+def score_points(data, params):
     model = LFModelSimple(params)
     z = torch.zeros_like(params[..., 0])
     sim_scores = score_sim_fit(
@@ -295,7 +332,7 @@ def add_randoms(pts, a):
 
 def update_momentum(m, a, pts_old, scores_old, pts_new, scores_new):
     score_diff = scores_new - scores_old
-    pts_diff = pts_new - pts_old
+    pts_diff = (pts_new - pts_old) / pts_old.abs()
     return m + pts_diff * score_diff.unsqueeze(-1) * a
 
 
@@ -315,7 +352,7 @@ def select_min_indexes(scores, n):
     return torch.cat([selected, rest[torch.randperm(rest.shape[0], device=scores.device)[:n//2]]], dim=0)
 
 
-def search_step(old_pts, old_scores, old_moments, n, a, b):
+def search_step(data, old_pts, old_scores, old_moments, n, a, b):
     new_pts = torch.cat([
         add_randoms(old_pts, a),
         old_pts + old_moments * b,
@@ -342,7 +379,7 @@ def search_step(old_pts, old_scores, old_moments, n, a, b):
     prev_scores = prev_scores[valid_indexes]
     prev_moments = prev_moments[valid_indexes]
 
-    new_scores = score_points(new_pts)
+    new_scores = score_points(data, new_pts)
     new_moments = update_momentum(prev_moments, .2, prev_pts, prev_scores, new_pts, new_scores)
 
     all_pts = torch.cat([old_pts, new_pts], dim=0)
@@ -370,29 +407,38 @@ def vis_params(data, params):
     # print(sim_score)
 
 
-data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx')
-vis_params(data, [0.4172075563144838, 5.723461584353651, 0.9656607240538969, 7.470953468884207, 0.014555336272441951, 0.019526787694686642])
-# plot_lf_case(0, data)
+@command()
+def test_model():
+    data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx')
+    vis_params(data, [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004])
+    # plot_lf_case(0, data)
 
 
-# # device='cuda:0'
-# device='cpu'
-# data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx', device=device)
+@command()
+@option('--device', default='cpu')
+def fit_model(device):
+    data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx', device=device)
 
-# params = torch.tensor([
-#     [0.7588616553732135, 1.4373874533665931, 1.4433255976561348, 2.662878072033703, 0.012110820750557343, 0.005830517083218478],
-#     # [.5, .1, 100, 50, 80, .1],
-#     [0, 0, 0, 0, 0, 0]
-# ], dtype=torch.float64, device=device) + .01
-# scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
-# moments = torch.zeros_like(params)
+    params = torch.tensor([
+        [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
+        # [.5, .1, 100, 50, 80, .1],
+        [0, 0, 0, 0, 0, 0, 0]
+    ], dtype=torch.float64, device=device) + .01
+    scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
+    moments = torch.zeros_like(params)
 
-# a = 1
-# b = 5
-# for it in range(100):
-#     params, scores, moments = search_step(params, scores, moments, 500, a, b)
-#     # a *= .97
-#     # print(params)
-#     print(it, a, float(scores[0]), tuple(map(float, params[0])))
-# print(params.shape)
-# print(tuple(map(float, params[0])))
+    a = 1
+    b = 5
+    for it in range(100):
+        params, scores, moments = search_step(data, params, scores, moments, 5000, a, b)
+        # a *= .97
+        # print(params)
+        print(it, a, float(scores[0]), tuple(map(float, params[0])))
+    print(params.shape)
+    print(tuple(map(float, params[0])))
+
+
+if __name__ == '__main__':
+    func_name = argv[1]
+    argv[:] = argv[0:1] + argv[2:]
+    globals()[func_name]()
