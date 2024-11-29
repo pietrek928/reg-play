@@ -70,8 +70,16 @@ class LFReg:
             (line_pos - line_pos_last) / dt,
         ], dim=-1)
 
-        state = state + A * state + B * u
+        state = state + (A * state + B * u) * dt
         y = C * state + D * u
+
+        return {
+            'u_l': y[..., 0],
+            'u_r': y[..., 1],
+        }, {
+            'line_pos_last': line_pos,
+            'state': state,
+        }
 
 
 # transform angles tensor to drot
@@ -134,10 +142,43 @@ def score_sim_fit(
             if k not in out_keys
         }
         out_dx = step_func(in_data | state)
-        # state = {
-        #     k: v + out_dx[k] * in_data['dt']
-        #     for k, v in state.items()
-        # }
+        for k in state.keys():
+            state[k] += out_dx[k] * in_data['dt']
+        out_gt = {
+            k: v[:, it]
+            for k, v in samples.items()
+            if k in out_keys
+        }
+        scores.append(score_func(state, out_gt))
+    scores = torch.stack(scores, dim=-1)
+    return scores.mean(dim=-1)
+
+
+# dims: (sample, time)
+def score_reg_fit(
+        step_func, reg_func, score_func,
+        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor],
+        samples: Dict[str, torch.Tensor], out_keys: Tuple[str, ...]
+):
+    state = {
+        k: v.clone() for k, v in state.items()
+    }
+    reg_state = {
+        k: v.clone() for k, v in reg_state.items()
+    }
+    scores = []
+    n = tuple(samples.values())[0].shape[-1]
+    for it in range(n):
+        if it % 100 == 0:
+            collect()
+
+        in_data = {
+            k: v[:, it]
+            for k, v in samples.items()
+            if k not in out_keys
+        }
+        reg_out, reg_state = reg_func(in_data | reg_state)
+        out_dx = step_func(in_data | reg_out | state)
         for k in state.keys():
             state[k] += out_dx[k] * in_data['dt']
         out_gt = {
