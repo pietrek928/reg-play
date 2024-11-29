@@ -1,4 +1,3 @@
-from collections import defaultdict
 from gc import collect
 from typing import Dict, Tuple
 import torch
@@ -154,21 +153,22 @@ def prepare_lf_data(fname, device='cpu'):
     angle_l = torch.from_numpy(df['angle_l'].to_numpy()).to(
         dtype=torch.float64, device=device
     ).unsqueeze(0)
-    drot_l = compute_drot(angle_l)
+    drot_l = compute_drot(angle_l) * .1  # gear is 10x
     rot_l = accum_drot(drot_l)
 
     angle_r = torch.from_numpy(df['angle_r'].to_numpy()).to(
         dtype=torch.float64, device=device
     ).unsqueeze(0)
-    drot_r = -compute_drot(angle_r)
+    drot_r = -compute_drot(angle_r) * .1  # gear is 10x
     rot_r = accum_drot(drot_r)
 
     # Wheel R=2cm, wheels distance d=15cm
-    d_l = rot_l * .02
-    d_r = rot_r * .02
-    ddist = (d_l + d_r) * .5
+    d_l = drot_l * .02
+    d_r = drot_r * .02
+    ddist = torch.cat((torch.zeros_like(d_l[..., :1]), (d_l + d_r) * .5), dim=-1)
     drot = (d_l - d_r) * (1 / .15)
-    rot = torch.cumsum(drot, -1)
+    rot = accum_drot(drot)
+    # print(tuple(map(float, drot_l[0])))
     x = torch.cumsum(ddist * rot.cos(), -1)
     y = torch.cumsum(ddist * rot.sin(), -1)
 
@@ -177,13 +177,13 @@ def prepare_lf_data(fname, device='cpu'):
         t=t,
         # drot_l=drot_l,
         rot_l=rot_l,
-        dl=rot_l * (.02 * torch.pi),
+        dl=accum_drot(d_l),
         u_l=torch.from_numpy(df['motor_l_u'].to_numpy()).to(
             dtype=torch.float64, device=device
         ).unsqueeze(0),
         # drot_r=drot_r,
         rot_r=rot_r,
-        dr=rot_r * (.02 * torch.pi),
+        dr=accum_drot(d_r),
         u_r=torch.from_numpy(df['motor_r_u'].to_numpy()).to(
             dtype=torch.float64, device=device
         ).unsqueeze(0),
@@ -192,27 +192,32 @@ def prepare_lf_data(fname, device='cpu'):
     )
 
 
+def plt_on_key(event):
+    import matplotlib.pyplot as plt
+    if event.key == 'escape' or event.key == ' ':
+        plt.close('all')
+
+
 def plot_lf_case(case_num, data, data_sim=None):
     import matplotlib.pyplot as plt
 
     t = data['t'][case_num]
 
     # Create subplots
-    fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    fig.canvas.mpl_connect('key_press_event', plt_on_key)
 
     # Plot wheel left rotations
     axs[0, 0].plot(t, data['dl'][case_num], label='Wheel left distance', color='b')
     axs[0, 0].set_title('Wheel left distance')
     axs[0, 0].set_xlabel('Time')
     axs[0, 0].set_ylabel('Distance')
-    axs[0, 0].legend()
 
     # Plot wheel right rotation
     axs[0, 1].plot(t, data['dr'][case_num], label='Wheel right distance', color='g')
     axs[0, 1].set_title('Wheel right distance')
     axs[0, 1].set_xlabel('Time')
     axs[0, 1].set_ylabel('Distance')
-    axs[0, 1].legend()
 
     # Plot voltage 1
     axs[1, 0].plot(t, data['u_l'][case_num], label='Voltage left', color='r')
@@ -230,9 +235,26 @@ def plot_lf_case(case_num, data, data_sim=None):
 
     if data_sim is not None:
         axs[0, 0].plot(t, data_sim['dl'][case_num], label='Simulated left distance', color='orange', linestyle='--')
-        axs[0, 0].legend()
         axs[0, 1].plot(t, data_sim['dr'][case_num], label='Simulated right distance', color='orange', linestyle='--')
-        axs[0, 1].legend()
+
+    axs[0, 0].legend()
+    axs[0, 1].legend()
+
+    plt.tight_layout()
+
+    # Plot robot trace
+    fig = plt.figure(figsize=(7, 7))
+    fig.canvas.mpl_connect('key_press_event', plt_on_key)
+    plt.plot(data['x'][case_num], data['y'][case_num], label='Robot trace', color='b')
+    plt.title('Robot Trace')
+    plt.xlabel('X position')
+    plt.ylabel('Y position')
+
+    if data_sim:
+        plt.plot(data_sim['x'][case_num], data_sim['y'][case_num], label='Simulated trace', color='orange', linestyle='--')
+
+    plt.legend()
+    plt.axis('equal')  # This ensures the aspect ratio is 1:1
 
     # Adjust layout
     plt.tight_layout()
@@ -243,8 +265,10 @@ def plot_lf_case(case_num, data, data_sim=None):
 
 def score_lf_fit(state_gt, state_sim):
     return (
-        (state_gt['dl'] - state_sim['dl']) ** 2.
-        + (state_gt['dr'] - state_sim['dr']) ** 2.
+        # (state_gt['dl'] - state_sim['dl']) ** 2.
+        # + (state_gt['dr'] - state_sim['dr']) ** 2.
+        (state_gt['x'] - state_sim['x']).abs()
+        + (state_gt['y'] - state_sim['y']).abs()
     )
 
 
@@ -345,17 +369,19 @@ def vis_params(data, params):
     # )
     # print(sim_score)
 
+
 data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx')
-vis_params(data, [2.165925225621571, 0.0516630785650092, 0.041066706577213015, 112.50283206725963, 0.7414677216321874, 0.506700264484151])
+vis_params(data, [0.4172075563144838, 5.723461584353651, 0.9656607240538969, 7.470953468884207, 0.014555336272441951, 0.019526787694686642])
+# plot_lf_case(0, data)
 
 
-# device='cuda:0'
-# # device='cpu'
+# # device='cuda:0'
+# device='cpu'
 # data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx', device=device)
 
 # params = torch.tensor([
-#     [0.9386564921990348, 0.0510397941187321, 0.04097628708440863, 149.38405005788226, 9.72265956724609, 0.2052234886348298],
-#     # [.5, -.1, 100, 50, 80, .1, 1],
+#     [0.7588616553732135, 1.4373874533665931, 1.4433255976561348, 2.662878072033703, 0.012110820750557343, 0.005830517083218478],
+#     # [.5, .1, 100, 50, 80, .1],
 #     [0, 0, 0, 0, 0, 0]
 # ], dtype=torch.float64, device=device) + .01
 # scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
@@ -364,7 +390,7 @@ vis_params(data, [2.165925225621571, 0.0516630785650092, 0.041066706577213015, 1
 # a = 1
 # b = 5
 # for it in range(100):
-#     params, scores, moments = search_step(params, scores, moments, 5000, a, b)
+#     params, scores, moments = search_step(params, scores, moments, 500, a, b)
 #     # a *= .97
 #     # print(params)
 #     print(it, a, float(scores[0]), tuple(map(float, params[0])))
