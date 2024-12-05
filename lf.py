@@ -98,7 +98,7 @@ def accum_drot(drot):
 
 def segment_distance(S, P):
     # Unpack segment endpoints
-    A, B = S[:-1, :], S[1:, :]
+    A, B = S[..., :-1, :], S[..., 1:, :]
 
     # Vector from segment start to end
     seg_vec = B - A
@@ -120,6 +120,57 @@ def segment_distance(S, P):
     distance = torch.norm(P.unsqueeze(1) - closest_point, dim=2).amin(dim=1)  # Shape (N, M)
 
     return distance
+
+
+def compute_segment_distances_along(S, P, D):
+    # sections: Tensor of shape [N, 4] where each row is (x1, y1, x2, y2)
+    # points: Tensor of shape [N, 2] where each row is (px, py)
+    # directions: Tensor of shape [N, 2] where each row is (dx, dy)
+
+    # Unpack sections into endpoints
+    S = S.unsqueeze(0)
+    P = P.unsqueeze(1)
+    D = D.unsqueeze(1)
+
+    A, B = S[..., :-1, :], S[..., 1:, :]
+
+    # Calculate direction vectors of the sections
+    V = B - A
+
+    # Calculate the denominator for the intersection formula
+    denominator = V[..., 0] * D[..., 1] - V[..., 1] * D[..., 0]
+
+    # Check where denominator is not zero (i.e., lines are not parallel)
+    non_parallel_mask = denominator.abs() > 1e-9
+
+    # Calculate t and u for the intersection point formulas
+    AP = P.unshueeze(1) - A.unsqueeze(0)
+    t = (AP[..., 0] * D[..., 1] - AP[..., 1] * D[..., 0]) / denominator
+    u = (AP[..., 0] * V[..., 1] - AP[..., 1] * V[..., 0]) / denominator
+
+    # Initialize distances with a large value
+    distances = torch.full_like(AP[..., 0], 1e9)
+
+    # Calculate the intersection points
+    intersection = A + t * V
+
+    # Calculate vector from point to intersection
+    vector_to_intersection = intersection - P
+
+    # Calculate dot product to determine sign of distance
+    dot_product = (vector_to_intersection * D).sum(dim=-1)
+
+    # Calculate distances only for valid intersections
+    valid_intersections = (0 <= t) & (t <= 1) & (u >= 0) & non_parallel_mask
+
+    # Compute signed distances for valid intersections
+    distances[valid_intersections] = torch.sqrt(((intersection - P) ** 2).sum(dim=-1))
+
+    # Assign negative distance if the dot product is negative
+    distances[valid_intersections & (dot_product < 0)] *= -1
+
+    min_indices = torch.min(distances.abs(), dim=-1).indices
+    return torch.gather(distances, -1, min_indices.unsqueeze(-1))
 
 
 # dims: (sample, time)
