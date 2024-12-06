@@ -98,26 +98,28 @@ def accum_drot(drot):
 
 def segment_distance(S, P):
     # Unpack segment endpoints
+    P = P.unsqueeze(1)
+    S = S.unsqueeze(0)
     A, B = S[..., :-1, :], S[..., 1:, :]
 
     # Vector from segment start to end
     seg_vec = B - A
 
     # Vector from segment start to points
-    point_vec = P.unsqueeze(1) - A.unsqueeze(0)  # Shape (N, M, 2)
+    point_vec = P - A  # Shape (N, M, 2)
 
     # Project point_vec onto seg_vec
     seg_len_squared = (seg_vec ** 2).sum(dim=1)  # Shape (M,)
-    t = (point_vec * seg_vec.unsqueeze(0)).sum(dim=2) / seg_len_squared.unsqueeze(0)  # Shape (N, M)
+    t = (point_vec * seg_vec).sum(dim=2) / seg_len_squared  # Shape (N, M)
 
     # Clamp t to the range [0, 1]
     t = torch.clamp(t, 0, 1)
 
     # Find the closest point on the segment to the point
-    closest_point = A.unsqueeze(0) + t.unsqueeze(2) * seg_vec.unsqueeze(0)  # Shape (N, M, 2)
+    closest_point = A + t.unsqueeze(2) * seg_vec  # Shape (N, M, 2)
 
     # Compute the distance from the point to the closest point on the segment
-    distance = torch.norm(P.unsqueeze(1) - closest_point, dim=2).amin(dim=1)  # Shape (N, M)
+    distance = torch.norm(P - closest_point, dim=2).amin(dim=1)  # Shape (N, M)
 
     return distance
 
@@ -171,6 +173,26 @@ def compute_segment_distances_along(S, P, D):
 
     min_indices = torch.min(distances.abs(), dim=-1).indices
     return torch.gather(distances, -1, min_indices.unsqueeze(-1))
+
+
+def compute_lf_line_state(x, y, S, a, r, line_pos_old):
+    P = torch.stack([x, y], dim=-1)
+    line_dist = segment_distance(S, P)
+
+    max_d = 60
+
+    dx, dy = r * a.cos(), r * a.sin()
+    P = torch.stack([x + dx, y + dy], dim=-1)
+    D = torch.stack([dy, -dx], dim=-1)
+    line_pos = compute_segment_distances_along(S, P, D)
+
+    # update only values in visible distance
+    line_pos = torch.where((line_pos >= -max_d) & (line_pos <= max_d), line_pos, line_pos_old)
+
+    return {
+        'line_dist': line_dist,
+        'line_pos': line_pos,
+    }
 
 
 # dims: (sample, time)
