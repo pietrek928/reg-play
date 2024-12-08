@@ -175,11 +175,12 @@ def compute_segment_distances_along(S, P, D):
     return torch.gather(distances, -1, min_indices.unsqueeze(-1))
 
 
-def compute_lf_line_state(x, y, S, a, r, line_pos_old):
-    P = torch.stack([x, y], dim=-1)
+def compute_lf_line_state(state, S, r):
+    P = torch.stack([state['x'], state['y']], dim=-1)
+    a = state['a']
     line_dist = segment_distance(S, P)
 
-    max_d = 60
+    max_d = .06
 
     dx, dy = r * a.cos(), r * a.sin()
     P = torch.stack([x + dx, y + dy], dim=-1)
@@ -187,7 +188,7 @@ def compute_lf_line_state(x, y, S, a, r, line_pos_old):
     line_pos = compute_segment_distances_along(S, P, D)
 
     # update only values in visible distance
-    line_pos = torch.where((line_pos >= -max_d) & (line_pos <= max_d), line_pos, line_pos_old)
+    line_pos = torch.where((line_pos >= -max_d) & (line_pos <= max_d), line_pos, state['line_pos'])
 
     return {
         'line_dist': line_dist,
