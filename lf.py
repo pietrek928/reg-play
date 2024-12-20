@@ -175,27 +175,6 @@ def compute_segment_distances_along(S, P, D):
     return torch.gather(distances, -1, min_indices.unsqueeze(-1))
 
 
-def compute_lf_line_state(state, S, r):
-    P = torch.stack([state['x'], state['y']], dim=-1)
-    a = state['a']
-    line_dist = segment_distance(S, P)
-
-    max_d = .06
-
-    dx, dy = r * a.cos(), r * a.sin()
-    P = torch.stack([x + dx, y + dy], dim=-1)
-    D = torch.stack([dy, -dx], dim=-1)
-    line_pos = compute_segment_distances_along(S, P, D)
-
-    # update only values in visible distance
-    line_pos = torch.where((line_pos >= -max_d) & (line_pos <= max_d), line_pos, state['line_pos'])
-
-    return {
-        'line_dist': line_dist,
-        'line_pos': line_pos,
-    }
-
-
 # dims: (sample, time)
 def score_sim_fit(
         step_func, score_func, state: Dict[str, torch.Tensor],
@@ -230,9 +209,8 @@ def score_sim_fit(
 
 # dims: (sample, time)
 def score_reg_fit(
-        step_func, reg_func, score_func,
-        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor],
-        samples: Dict[str, torch.Tensor], out_keys: Tuple[str, ...]
+        step_func, reg_func, score_func, dt,
+        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor]
 ):
     state = {
         k: v.clone() for k, v in state.items()
@@ -241,26 +219,15 @@ def score_reg_fit(
         k: v.clone() for k, v in reg_state.items()
     }
     scores = []
-    n = tuple(samples.values())[0].shape[-1]
+    n = dt.shape[0]
     for it in range(n):
         if it % 100 == 0:
             collect()
+        dt_val = dt[it]
 
-        in_data = {
-            k: v[:, it]
-            for k, v in samples.items()
-            if k not in out_keys
-        }
-        reg_out, reg_state = reg_func(in_data | reg_state)
-        out_dx = step_func(in_data | reg_out | state)
-        for k in state.keys():
-            state[k] += out_dx[k] * in_data['dt']
-        out_gt = {
-            k: v[:, it]
-            for k, v in samples.items()
-            if k in out_keys
-        }
-        scores.append(score_func(state, out_gt))
+        reg_out, reg_state = reg_func(reg_state | state | {'dt': dt_val})
+        state = step_func(reg_out | state | {'dt': dt_val})
+        scores.append(score_func(state))
     scores = torch.stack(scores, dim=-1)
     return scores.mean(dim=-1)
 
@@ -290,6 +257,34 @@ def run_model_sim(
     return {
         k: torch.stack(vs, dim=-1)
         for k, vs in states.items()
+    }
+
+
+def lf_line_track_step(state, lf_model, params):
+    model_dx = lf_model.cmpute_dx(state)
+    dt = state['dt']
+    for k, v in model_dx.items():
+        state[k] += v * dt
+
+    r = params['r']
+    S = params['segments']
+    P = torch.stack([state['x'], state['y']], dim=-1)
+    a = state['a']
+    line_dist = segment_distance(S, P)
+
+    max_d = .06
+
+    dx, dy = r * a.cos(), r * a.sin()
+    P = torch.stack([x + dx, y + dy], dim=-1)
+    D = torch.stack([dy, -dx], dim=-1)
+    line_sensor = compute_segment_distances_along(S, P, D)
+
+    # update only values in visible distance
+    line_sensor = torch.where((line_sensor >= -max_d) & (line_sensor <= max_d), line_sensor, state['line_pos'])
+
+    return state | {
+        'line_dist': line_dist,
+        'line_sensor': line_sensor,
     }
 
 
@@ -438,6 +433,17 @@ def score_points(data, params):
     return sim_scores + params.abs().mean(dim=-1) * .01
 
 
+def score_reg_points(params):
+    reg = LFReg(params)
+    z = torch.zeros_like(params[..., 0])
+    sim_scores = score_reg_fit(
+        lf_line_track_step, reg.compute_step, score_line_fit, dt,
+        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
+        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
+    )
+    return sim_scores + params.abs().mean(dim=-1) * .01
+
+
 # TODO: better interpolation
 def add_randoms(pts, a):
     v = pts.std(dim=0) + pts.abs().mean(dim=0) * .25
@@ -467,7 +473,13 @@ def select_min_indexes(scores, n):
     return torch.cat([selected, rest[torch.randperm(rest.shape[0], device=scores.device)[:n//2]]], dim=0)
 
 
-def search_step(data, old_pts, old_scores, old_moments, n, a, b):
+def search_step(
+        score_pts, validate_pts,
+        old_pts, old_scores, old_moments,
+        hyper_params
+):
+    a = hyper_params['a']
+    b = hyper_params['b']
     new_pts = torch.cat([
         add_randoms(old_pts, a),
         old_pts + old_moments * b,
@@ -488,13 +500,13 @@ def search_step(data, old_pts, old_scores, old_moments, n, a, b):
     prev_scores = torch.cat([old_scores] * 14, dim=0)
     prev_moments = torch.cat([old_moments] * 14, dim=0)
 
-    valid_indexes = validate_lf_params(new_pts)
+    valid_indexes = validate_pts(new_pts)
     new_pts = new_pts[valid_indexes]
     prev_pts = prev_pts[valid_indexes]
     prev_scores = prev_scores[valid_indexes]
     prev_moments = prev_moments[valid_indexes]
 
-    new_scores = score_points(data, new_pts)
+    new_scores = score_pts(new_pts)
     new_moments = update_momentum(prev_moments, .2, prev_pts, prev_scores, new_pts, new_scores)
 
     all_pts = torch.cat([old_pts, new_pts], dim=0)
@@ -551,6 +563,31 @@ def fit_model(device):
         print(it, a, float(scores[0]), tuple(map(float, params[0])))
     print(params.shape)
     print(tuple(map(float, params[0])))
+
+
+@command()
+@option('--device', default='cpu')
+def fit_reg(device):
+    params = torch.tensor([
+        [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
+    ], dtype=torch.float64, device=device)
+    lines = torch.tensor([
+        [[0, 0], [1, 1], [1, 0]],
+        [[0, 0], [1, 1], [0, 1]],
+    ], dtype=torch.float64, device=device)
+    reg_params = torch.zeros((2, 48), dtype=torch.float64, device=device)
+    moments = torch.zeros_like(reg_params)
+
+    a = 1
+    b = 5
+    for it in range(100):
+        params, scores, moments = search_step(data, params, scores, moments, 5000, a, b)
+        # a *= .97
+        # print(params)
+        print(it, a, float(scores[0]), tuple(map(float, params[0])))
+    print(params.shape)
+    print(tuple(map(float, params[0])))
+
 
 
 if __name__ == '__main__':
