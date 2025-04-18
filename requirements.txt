@@ -4,3 +4,5 @@ pydantic
 numpy
 matplotlib
 click
+pandas
+shapely

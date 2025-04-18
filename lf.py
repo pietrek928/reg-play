@@ -96,45 +96,70 @@ def accum_drot(drot):
     return torch.cat([init_angle, rot], dim=-1)
 
 
-def segment_distance(S, P):
+def linestring_distance(S, P):
+    """
+    Distances from points to line strings
+    S: Tensor of shape [N, M, 2] where N is the number of lines and M is lines poitn count
+    P: Tensor of shape [N, 2] where N is the number of points
+    """
+
     # Unpack segment endpoints
-    P = P.unsqueeze(1)
-    S = S.unsqueeze(0)
-    A, B = S[..., :-1, :], S[..., 1:, :]
+    A, B = S[:, :-1, :], S[:, 1:, :]
 
     # Vector from segment start to end
     seg_vec = B - A
 
     # Vector from segment start to points
-    point_vec = P - A  # Shape (N, M, 2)
+    point_vec = P.unsqueeze(1) - A  # Shape (N, M-1, 2)
 
-    # Project point_vec onto seg_vec
-    seg_len_squared = (seg_vec ** 2).sum(dim=1)  # Shape (M,)
-    t = (point_vec * seg_vec).sum(dim=2) / seg_len_squared  # Shape (N, M)
-
+    # compute corss product
+    seg_len_squared = seg_vec.square().sum(dim=2)  # Shape (N, M-1)
+    t = (point_vec * seg_vec).sum(dim=2) / seg_len_squared  # Shape (N, M-1)
+ 
     # Clamp t to the range [0, 1]
-    t = torch.clamp(t, 0, 1)
-
-    # Find the closest point on the segment to the point
-    closest_point = A + t.unsqueeze(2) * seg_vec  # Shape (N, M, 2)
+    t = t.clamp(0, 1).unsqueeze(2)
 
     # Compute the distance from the point to the closest point on the segment
-    distance = torch.norm(P - closest_point, dim=2).amin(dim=1)  # Shape (N, M)
+    distance = torch.norm(point_vec - t * seg_vec, dim=2).amin(dim=1)  # Shape (N, )
 
     return distance
 
+def _compare_num_list(l1, l2, e=1e-6):
+    l1 = tuple(float(v) for v in l1)
+    l2 = tuple(float(v) for v in l2)
+    assert len(l1) == len(l2), 'Length is not equal'
+    for it, (v1, v2) in enumerate(zip(l1, l2)):
+        assert abs(v1 - v2) < e, f'item {it}: {v1} != {v2}'
 
-def compute_segment_distances_along(S, P, D):
-    # sections: Tensor of shape [N, 4] where each row is (x1, y1, x2, y2)
-    # points: Tensor of shape [N, 2] where each row is (px, py)
-    # directions: Tensor of shape [N, 2] where each row is (dx, dy)
+
+def test_linestring_distance():
+    from shapely.geometry import LineString, Point
+
+    l = ((0, 0), (1, 2))
+    pts = ((0, 0), (1, 2), (1, 1), (0.5, 0.5), (0, 2), (2, 0), (2, 2))
+
+    l_tensor = torch.tensor((l, ), dtype=torch.float64)
+    pts_tensor = torch.tensor(pts, dtype=torch.float64)
+
+    l_shapely = LineString(l)
+    distances_shapely = [l_shapely.distance(Point(pt)) for pt in pts]
+
+    _compare_num_list(linestring_distance(l_tensor, pts_tensor), distances_shapely)
+
+
+def linestring_distance_along(S, P, D):
+    """
+    Sign of distance determines if its on left or right
+    S: sections Tensor of shape [N, M, 2] where N is the number of lines and M is lines poitn count
+    P: points Tensor of shape [N, 2] where N is the number of points
+    D: directions Tensor of shape [N, 2] where N is the number of points
+    """
 
     # Unpack sections into endpoints
-    S = S.unsqueeze(0)
     P = P.unsqueeze(1)
     D = D.unsqueeze(1)
 
-    A, B = S[..., :-1, :], S[..., 1:, :]
+    A, B = S[:, :-1, :], S[:, 1:, :]
 
     # Calculate direction vectors of the sections
     V = B - A
@@ -146,33 +171,44 @@ def compute_segment_distances_along(S, P, D):
     non_parallel_mask = denominator.abs() > 1e-9
 
     # Calculate t and u for the intersection point formulas
-    AP = P.unshueeze(1) - A.unsqueeze(0)
+    AP = P - A
     t = (AP[..., 0] * D[..., 1] - AP[..., 1] * D[..., 0]) / denominator
-    u = (AP[..., 0] * V[..., 1] - AP[..., 1] * V[..., 0]) / denominator
-
-    # Initialize distances with a large value
-    distances = torch.full_like(AP[..., 0], 1e9)
 
     # Calculate the intersection points
-    intersection = A + t * V
+    intersection = A + t.unsqueeze(2) * V
 
     # Calculate vector from point to intersection
     vector_to_intersection = intersection - P
 
     # Calculate dot product to determine sign of distance
-    dot_product = (vector_to_intersection * D).sum(dim=-1)
+    dot_product = (vector_to_intersection * D).sum(dim=2)
 
     # Calculate distances only for valid intersections
-    valid_intersections = (0 <= t) & (t <= 1) & (u >= 0) & non_parallel_mask
+    valid_intersections = (0 <= t) & (t <= 1) & non_parallel_mask
 
     # Compute signed distances for valid intersections
-    distances[valid_intersections] = torch.sqrt(((intersection - P) ** 2).sum(dim=-1))
+    distances = torch.where(valid_intersections, vector_to_intersection.norm(dim=2), 1e9)
 
     # Assign negative distance if the dot product is negative
     distances[valid_intersections & (dot_product < 0)] *= -1
 
     min_indices = torch.min(distances.abs(), dim=-1).indices
     return torch.gather(distances, -1, min_indices.unsqueeze(-1))
+
+
+def test_linestring_distance_along():
+    from shapely.geometry import LineString, Point
+
+    l = ((0, 0), (1, 2))
+    pts = ((0, 0), (1, 2), (1, 1), (1, 1), (0.5, 0.5), (0, 2), (2, 0), (2, 2))
+    d = ((1, 0), (0, 1), (-1, 0), (1, 0), (0, -1), (1, 0), (0, 1), (-1, 0))
+
+    l_tensor = torch.tensor((l, ), dtype=torch.float64)
+    pts_tensor = torch.tensor(pts, dtype=torch.float64)
+    d_tensor = torch.tensor(d, dtype=torch.float64)
+    distances = linestring_distance_along(l_tensor, pts_tensor, d_tensor)
+
+    print(tuple(float(d) for d in distances))
 
 
 # dims: (sample, time)
@@ -270,14 +306,14 @@ def lf_line_track_step(state, lf_model, params):
     S = params['segments']
     P = torch.stack([state['x'], state['y']], dim=-1)
     a = state['a']
-    line_dist = segment_distance(S, P)
+    line_dist = linestring_distance(S, P)
 
     max_d = .06
 
     dx, dy = r * a.cos(), r * a.sin()
     P = torch.stack([x + dx, y + dy], dim=-1)
     D = torch.stack([dy, -dx], dim=-1)
-    line_sensor = compute_segment_distances_along(S, P, D)
+    line_sensor = linestring_distance_along(S, P, D)
 
     # update only values in visible distance
     line_sensor = torch.where((line_sensor >= -max_d) & (line_sensor <= max_d), line_sensor, state['line_pos'])
