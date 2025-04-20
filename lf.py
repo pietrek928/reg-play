@@ -2,6 +2,8 @@ from gc import collect
 from sys import argv
 from typing import Dict, Tuple
 from click import command, option
+from functools import partial
+
 import torch
 
 
@@ -43,8 +45,69 @@ def _unflatten_matrix(data: torch.Tensor, x, y):
     s = data.shape
     return data.view(*s[:-1], x, y)
 
+def compute_pid(e, eprev, i, dt, kp, ki, kd):
+    i += e * dt
+    d = (e - eprev) / dt
+    return kp * e + ki * i + kd * d, i
 
-class LFReg:
+
+class LFRegPID:
+    def __init__(self, params):
+        self.params = params
+
+    def compute_step(self, data):
+        kp_turn = self.params[..., 0]
+        ki_turn = self.params[..., 1]
+        kd_turn = self.params[..., 2]
+        kp_speed = self.params[..., 3]
+        ki_speed = self.params[..., 4]
+        kd_speed = self.params[..., 5]
+        kp_mot = self.params[..., 6]
+        ki_mot = self.params[..., 7]
+
+        state = data['state']
+        dt = data['dt']
+        drot_l = data['drot_l']
+        drot_r = data['drot_r']
+        line_pos = data['line_pos']
+
+        line_pos_last = state[0]
+        iturn = state[1]
+        ispeed = state[2]
+        ileft = state[3]
+        v_l_prev = state[4]
+        iright = state[5]
+        v_r_prev = state[6]
+
+        cturn, iturn = compute_pid(line_pos, line_pos_last, iturn, dt, kp_turn, ki_turn, kd_turn)
+        cspeed, ispeed = compute_pid(line_pos.abs(), line_pos_last.abs(), ispeed, dt, kp_speed, ki_speed, kd_speed)
+
+        vl = (1 - cspeed) * (1 - cturn)
+        vl_m = drot_l / dt
+        uleft, ileft = compute_pid(vl - vl_m, v_l_prev, ileft, dt, kp_mot, ki_mot, 0)
+        vr = (1 - cspeed) * (1 + cturn)
+        vr_m = drot_r / dt
+        uright, iright = compute_pid(vr - vr_m, v_r_prev, iright, dt, kp_mot, ki_mot, 0)
+
+        state = torch.stack([
+            line_pos,
+            iturn,
+            ispeed,
+            ileft,
+            vl_m,
+            iright,
+            vr_m,
+        ], dim=-1)
+
+        return {
+            'u_l': uleft,
+            'u_r': uright,
+        }, {
+            'state': state,
+        }
+
+
+class LFRegTest:
     def __init__(self, params):
         self.params = params
 
@@ -99,28 +162,28 @@ def accum_drot(drot):
 def linestring_distance(S, P):
     """
     Distances from points to line strings
-    S: Tensor of shape [N, M, 2] where N is the number of lines and M is lines poitn count
-    P: Tensor of shape [N, 2] where N is the number of points
+    S: Tensor of shape [N..., M, 2] where N is the number of lines and M is lines poitn count
+    P: Tensor of shape [N..., 2] where N is the number of points
     """
 
     # Unpack segment endpoints
-    A, B = S[:, :-1, :], S[:, 1:, :]
+    A, B = S[..., :-1, :], S[..., 1:, :]
 
     # Vector from segment start to end
     seg_vec = B - A
 
     # Vector from segment start to points
-    point_vec = P.unsqueeze(1) - A  # Shape (N, M-1, 2)
+    point_vec = P.unsqueeze(-2) - A  # Shape (N, M-1, 2)
 
     # compute corss product
-    seg_len_squared = seg_vec.square().sum(dim=2)  # Shape (N, M-1)
-    t = (point_vec * seg_vec).sum(dim=2) / seg_len_squared  # Shape (N, M-1)
+    seg_len_squared = seg_vec.square().sum(dim=-1)  # Shape (N, M-1)
+    t = (point_vec * seg_vec).sum(dim=-1) / seg_len_squared  # Shape (N, M-1)
  
     # Clamp t to the range [0, 1]
-    t = t.clamp(0, 1).unsqueeze(2)
+    t = t.clamp(0, 1).unsqueeze(-1)
 
     # Compute the distance from the point to the closest point on the segment
-    distance = torch.norm(point_vec - t * seg_vec, dim=2).amin(dim=1)  # Shape (N, )
+    distance = torch.norm(point_vec - t * seg_vec, dim=-1).amin(dim=-2)  # Shape (N, )
 
     return distance
 
@@ -150,16 +213,16 @@ def test_linestring_distance():
 def linestring_distance_along(S, P, D):
     """
     Sign of distance determines if its on left or right
-    S: sections Tensor of shape [N, M, 2] where N is the number of lines and M is lines poitn count
-    P: points Tensor of shape [N, 2] where N is the number of points
-    D: directions Tensor of shape [N, 2] where N is the number of points
+    S: sections Tensor of shape [N..., M, 2] where N is the number of lines and M is lines poitn count
+    P: points Tensor of shape [N..., 2] where N is the number of points
+    D: directions Tensor of shape [N..., 2] where N is the number of points
     """
 
     # Unpack sections into endpoints
-    P = P.unsqueeze(1)
-    D = D.unsqueeze(1)
+    P = P.unsqueeze(-2)
+    D = D.unsqueeze(-2).normalize(dim=-1)
 
-    A, B = S[:, :-1, :], S[:, 1:, :]
+    A, B = S[..., :-1, :], S[..., 1:, :]
 
     # Calculate direction vectors of the sections
     V = B - A
@@ -175,19 +238,19 @@ def linestring_distance_along(S, P, D):
     t = (AP[..., 0] * D[..., 1] - AP[..., 1] * D[..., 0]) / denominator
 
     # Calculate the intersection points
-    intersection = A + t.unsqueeze(2) * V
+    intersection = A + t.unsqueeze(-1) * V
 
     # Calculate vector from point to intersection
     vector_to_intersection = intersection - P
 
     # Calculate dot product to determine sign of distance
-    dot_product = (vector_to_intersection * D).sum(dim=2)
+    dot_product = (vector_to_intersection * D).sum(dim=-1)
 
     # Calculate distances only for valid intersections
     valid_intersections = (0 <= t) & (t <= 1) & non_parallel_mask
 
     # Compute signed distances for valid intersections
-    distances = torch.where(valid_intersections, vector_to_intersection.norm(dim=2), 1e9)
+    distances = torch.where(valid_intersections, vector_to_intersection.norm(dim=-1), 1e9)
 
     # Assign negative distance if the dot product is negative
     distances[valid_intersections & (dot_product < 0)] *= -1
@@ -311,7 +374,7 @@ def lf_line_track_step(state, lf_model, params):
     max_d = .06
 
     dx, dy = r * a.cos(), r * a.sin()
-    P = torch.stack([x + dx, y + dy], dim=-1)
+    P = torch.stack([state['x'] + dx, state['y'] + dy], dim=-1)
     D = torch.stack([dy, -dx], dim=-1)
     line_sensor = linestring_distance_along(S, P, D)
 
@@ -469,15 +532,26 @@ def score_points(data, params):
     return sim_scores + params.abs().mean(dim=-1) * .01
 
 
-def score_reg_points(params):
-    reg = LFReg(params)
+def score_line_fit(state_sim):
+    return (
+        state_sim['line_dist'] ** 2.
+        + state_sim['line_sensor'] ** 2. * .01
+    )
+
+
+def score_reg_points(params, lf_model, sim_params):
+    reg = LFRegPID(params)
     z = torch.zeros_like(params[..., 0])
     sim_scores = score_reg_fit(
-        lf_line_track_step, reg.compute_step, score_line_fit, dt,
+        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit, sim_params['dt'],
         dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
         dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
     )
     return sim_scores + params.abs().mean(dim=-1) * .01
+
+
+def validate_reg_params(params):
+    return torch.all(params > 0, dim=-1)
 
 
 # TODO: better interpolation
@@ -512,7 +586,7 @@ def select_min_indexes(scores, n):
 def search_step(
         score_pts, validate_pts,
         old_pts, old_scores, old_moments,
-        hyper_params
+        hyper_params, n_pts
 ):
     a = hyper_params['a']
     b = hyper_params['b']
@@ -549,7 +623,7 @@ def search_step(
     all_scores = torch.cat([old_scores, new_scores], dim=0)
     all_moments = torch.cat([old_moments, new_moments], dim=0)
 
-    selected_indexes = select_min_indexes(all_scores, n)
+    selected_indexes = select_min_indexes(all_scores, n_pts)
     return all_pts[selected_indexes], all_scores[selected_indexes], all_moments[selected_indexes]
 
 
@@ -604,26 +678,35 @@ def fit_model(device):
 @command()
 @option('--device', default='cpu')
 def fit_reg(device):
-    params = torch.tensor([
+    lf_params = torch.tensor([
         [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
     ], dtype=torch.float64, device=device)
+    lf_model = LFModelSimple(lf_params)
+
     lines = torch.tensor([
         [[0, 0], [1, 1], [1, 0]],
         [[0, 0], [1, 1], [0, 1]],
+        [[0, 0], [1, 1], [2, 2]],
     ], dtype=torch.float64, device=device)
-    reg_params = torch.zeros((2, 48), dtype=torch.float64, device=device)
+    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device)
     moments = torch.zeros_like(reg_params)
+    scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
 
-    a = 1
-    b = 5
+    sim_params = dict(
+        a=1, b=5
+    )
+
     for it in range(100):
-        params, scores, moments = search_step(data, params, scores, moments, 5000, a, b)
+        params, scores, moments = search_step(
+            partial(score_reg_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
+            reg_params, scores, moments,
+            sim_params, 64
+        )
         # a *= .97
         # print(params)
-        print(it, a, float(scores[0]), tuple(map(float, params[0])))
-    print(params.shape)
+        print(it, sim_params['a'], float(scores[0]), tuple(map(float, params[0])))
+    print(lf_params.shape)
     print(tuple(map(float, params[0])))
-
 
 
 if __name__ == '__main__':
