@@ -5,11 +5,16 @@ from click import command, option
 from functools import partial
 
 import torch
+from torch.nn import functional as torch_func
 
 
 class LFModelSimple:
     def __init__(self, params):
         self.params = params
+
+    @property
+    def r(self):
+        return self.params[..., 0]
 
     def compute_dx(self, data):
         p = self.params
@@ -71,13 +76,13 @@ class LFRegPID:
         drot_r = data['drot_r']
         line_pos = data['line_pos']
 
-        line_pos_last = state[0]
-        iturn = state[1]
-        ispeed = state[2]
-        ileft = state[3]
-        v_l_prev = state[4]
-        iright = state[5]
-        v_r_prev = state[6]
+        line_pos_last = state[..., 0]
+        iturn = state[..., 1]
+        ispeed = state[..., 2]
+        ileft = state[..., 3]
+        v_l_prev = state[..., 4]
+        iright = state[..., 5]
+        v_r_prev = state[..., 6]
 
         cturn, iturn = compute_pid(line_pos, line_pos_last, iturn, dt, kp_turn, ki_turn, kd_turn)
         cspeed, ispeed = compute_pid(line_pos.abs(), line_pos_last.abs(), ispeed, dt, kp_speed, ki_speed, kd_speed)
@@ -175,7 +180,7 @@ def linestring_distance(S, P):
     # Vector from segment start to points
     point_vec = P.unsqueeze(-2) - A  # Shape (N, M-1, 2)
 
-    # compute corss product
+    # compute cross product
     seg_len_squared = seg_vec.square().sum(dim=-1)  # Shape (N, M-1)
     t = (point_vec * seg_vec).sum(dim=-1) / seg_len_squared  # Shape (N, M-1)
  
@@ -183,7 +188,7 @@ def linestring_distance(S, P):
     t = t.clamp(0, 1).unsqueeze(-1)
 
     # Compute the distance from the point to the closest point on the segment
-    distance = torch.norm(point_vec - t * seg_vec, dim=-1).amin(dim=-2)  # Shape (N, )
+    distance = torch.norm(point_vec - t * seg_vec, dim=-1).amin(dim=-1)  # Shape (N, )
 
     return distance
 
@@ -220,7 +225,7 @@ def linestring_distance_along(S, P, D):
 
     # Unpack sections into endpoints
     P = P.unsqueeze(-2)
-    D = D.unsqueeze(-2).normalize(dim=-1)
+    D = torch_func.normalize(D.unsqueeze(-2), dim=-1)
 
     A, B = S[..., :-1, :], S[..., 1:, :]
 
@@ -256,7 +261,7 @@ def linestring_distance_along(S, P, D):
     distances[valid_intersections & (dot_product < 0)] *= -1
 
     min_indices = torch.min(distances.abs(), dim=-1).indices
-    return torch.gather(distances, -1, min_indices.unsqueeze(-1))
+    return torch.gather(distances, -1, min_indices.unsqueeze(-1)).squeeze(-1)
 
 
 def test_linestring_distance_along():
@@ -360,12 +365,12 @@ def run_model_sim(
 
 
 def lf_line_track_step(state, lf_model, params):
-    model_dx = lf_model.cmpute_dx(state)
+    model_dx = lf_model.compute_dx(state)
     dt = state['dt']
     for k, v in model_dx.items():
         state[k] += v * dt
 
-    r = params['r']
+    r = lf_model.r
     S = params['segments']
     P = torch.stack([state['x'], state['y']], dim=-1)
     a = state['a']
@@ -384,6 +389,8 @@ def lf_line_track_step(state, lf_model, params):
     return state | {
         'line_dist': line_dist,
         'line_sensor': line_sensor,
+        'drot_l': model_dx['dl'] * dt / r,
+        'drot_r': model_dx['dr'] * dt / r,
     }
 
 
@@ -542,10 +549,11 @@ def score_line_fit(state_sim):
 def score_reg_points(params, lf_model, sim_params):
     reg = LFRegPID(params)
     z = torch.zeros_like(params[..., 0])
+    ones = torch.ones_like(params[..., 0])
     sim_scores = score_reg_fit(
-        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit, sim_params['dt'],
-        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
-        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z),
+        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit, ones * 0.01,
+        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
+        dict(state=z.unsqueeze(-1).expand(-1, 7)),
     )
     return sim_scores + params.abs().mean(dim=-1) * .01
 
@@ -688,12 +696,12 @@ def fit_reg(device):
         [[0, 0], [1, 1], [0, 1]],
         [[0, 0], [1, 1], [2, 2]],
     ], dtype=torch.float64, device=device)
-    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device)
+    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device) + .01
     moments = torch.zeros_like(reg_params)
     scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
 
     sim_params = dict(
-        a=1, b=5
+        a=1, b=5, segments=lines
     )
 
     for it in range(100):
