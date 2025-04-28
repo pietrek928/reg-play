@@ -12,10 +12,6 @@ class LFModelSimple:
     def __init__(self, params):
         self.params = params
 
-    @property
-    def r(self):
-        return self.params[..., 0]
-
     def compute_dx(self, data):
         p = self.params
 
@@ -333,7 +329,7 @@ def score_reg_fit(
         state = step_func(reg_out | state | {'dt': dt_val})
         scores.append(score_func(state))
     scores = torch.stack(scores, dim=-1)
-    return scores.mean(dim=-1)
+    return scores.mean(dim=-1), state
 
 
 # dims: (sample, time)
@@ -370,7 +366,8 @@ def lf_line_track_step(state, lf_model, params):
     for k, v in model_dx.items():
         state[k] += v * dt
 
-    r = lf_model.r
+    lf_len = params['lf_len']
+    r_wheel = params['r_wheel']
     S = params['segments']
     P = torch.stack([state['x'], state['y']], dim=-1)
     a = state['a']
@@ -378,7 +375,7 @@ def lf_line_track_step(state, lf_model, params):
 
     max_d = .06
 
-    dx, dy = r * a.cos(), r * a.sin()
+    dx, dy = lf_len * a.cos(), lf_len * a.sin()
     P = torch.stack([state['x'] + dx, state['y'] + dy], dim=-1)
     D = torch.stack([dy, -dx], dim=-1)
     line_sensor = linestring_distance_along(S, P, D)
@@ -389,8 +386,8 @@ def lf_line_track_step(state, lf_model, params):
     return state | {
         'line_dist': line_dist,
         'line_sensor': line_sensor,
-        'drot_l': model_dx['dl'] * dt / r,
-        'drot_r': model_dx['dr'] * dt / r,
+        'drot_l': model_dx['dl'] * dt / r_wheel,
+        'drot_r': model_dx['dr'] * dt / r_wheel,
     }
 
 
@@ -546,16 +543,31 @@ def score_line_fit(state_sim):
     )
 
 
+def lf_score_result(state):
+    return (state['x'].square() + state['y'].square()).sqrt()
+
+
 def score_reg_points(params, lf_model, sim_params):
     reg = LFRegPID(params)
     z = torch.zeros_like(params[..., 0])
     ones = torch.ones_like(params[..., 0])
-    sim_scores = score_reg_fit(
+    sim_scores, end_state = score_reg_fit(
         partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit, ones * 0.01,
         dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
         dict(state=z.unsqueeze(-1).expand(-1, 7)),
     )
-    return sim_scores + params.abs().mean(dim=-1) * .01
+    return sim_scores - lf_score_result(end_state) + params.abs().mean(dim=-1) * .01
+
+
+def score_lf_points(params, lf_model, sim_params):
+    segments = sim_params['segments']
+    ncases = params.shape[0]
+    nsegments = segments.shape[0]
+    params = params.repeat(nsegments, 1)
+    segments = segments.repeat(ncases, 1, 1)
+
+    scores = score_reg_points(params, lf_model, sim_params | {'segments': segments})
+    return scores.view(ncases, nsegments).mean(dim=-1)
 
 
 def validate_reg_params(params):
@@ -696,25 +708,25 @@ def fit_reg(device):
         [[0, 0], [1, 1], [0, 1]],
         [[0, 0], [1, 1], [2, 2]],
     ], dtype=torch.float64, device=device)
-    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device) + .01
+    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device) + .001
     moments = torch.zeros_like(reg_params)
     scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
 
     sim_params = dict(
-        a=1, b=5, segments=lines
+        a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
     )
 
     for it in range(100):
-        params, scores, moments = search_step(
-            partial(score_reg_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
+        reg_params, scores, moments = search_step(
+            partial(score_lf_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
             reg_params, scores, moments,
             sim_params, 64
         )
         # a *= .97
         # print(params)
-        print(it, sim_params['a'], float(scores[0]), tuple(map(float, params[0])))
+        print(it, sim_params['a'], float(scores[0]), tuple(map(float, reg_params[0])))
     print(lf_params.shape)
-    print(tuple(map(float, params[0])))
+    print(tuple(map(float, reg_params[0])))
 
 
 if __name__ == '__main__':
