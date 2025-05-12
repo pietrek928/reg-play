@@ -8,6 +8,20 @@ import torch
 from torch.nn import functional as torch_func
 
 
+def stack_tensor_dicts(dicts, dim=0):
+    return {
+        k: torch.stack([d[k] for d in dicts], dim=dim)
+        for k in {k for d in dicts for k in d.keys()}
+    }
+
+
+def clone_tensor_dict(d):
+    return {
+        k: v.clone()
+        for k, v in d.items()
+    }
+
+
 class LFModelSimple:
     def __init__(self, params):
         self.params = params
@@ -60,11 +74,12 @@ class LFRegPID:
         kp_turn = self.params[..., 0]
         ki_turn = self.params[..., 1]
         kd_turn = self.params[..., 2]
-        kp_speed = self.params[..., 3]
-        ki_speed = self.params[..., 4]
-        kd_speed = self.params[..., 5]
+        kadd_speed = self.params[..., 3]
+        kline_speed = self.params[..., 4]
+        kline2_speed = self.params[..., 5]
         kp_mot = self.params[..., 6]
         ki_mot = self.params[..., 7]
+        kd_mot = self.params[..., 8]
 
         state = data['state']
         dt = data['dt']
@@ -81,12 +96,14 @@ class LFRegPID:
         v_r_prev = state[..., 6]
 
         cturn, iturn = compute_pid(line_pos, line_pos_last, iturn, dt, kp_turn, ki_turn, kd_turn)
-        cspeed, ispeed = compute_pid(line_pos.abs(), line_pos_last.abs(), ispeed, dt, kp_speed, ki_speed, kd_speed)
+        # cspeed, ispeed = compute_pid(line_pos.abs(), line_pos_last.abs(), ispeed, dt, kp_speed, ki_speed, kd_speed)
+        ispeed += (kadd_speed - line_pos.abs() * kline_speed) * dt
+        ispeed = ispeed.clamp(0, 1)
 
-        vl = (1 - cspeed) * (1 - cturn)
+        vl = ispeed * (1 - cturn)
         vl_m = drot_l / dt
         uleft, ileft = compute_pid(vl - vl_m, v_l_prev, ileft, dt, kp_mot, ki_mot, 0)
-        vr = (1 - cspeed) * (1 + cturn)
+        vr = ispeed * (1 + cturn)
         vr_m = drot_r / dt
         uright, iright = compute_pid(vr - vr_m, v_r_prev, iright, dt, kp_mot, ki_mot, 0)
 
@@ -326,10 +343,37 @@ def score_reg_fit(
         dt_val = dt[it]
 
         reg_out, reg_state = reg_func(reg_state | state | {'dt': dt_val})
-        state = step_func(reg_out | state | {'dt': dt_val})
+        state = step_func(state | reg_out | {'dt': dt_val})
         scores.append(score_func(state))
     scores = torch.stack(scores, dim=-1)
     return scores.mean(dim=-1), state
+
+
+def sim_reg_fit(
+        step_func, reg_func, dt,
+        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor]
+):
+    state = {
+        k: v.clone() for k, v in state.items()
+    }
+    reg_state = {
+        k: v.clone() for k, v in reg_state.items()
+    }
+
+    states = []
+    reg_states = []
+    n = dt.shape[0]
+    for it in range(n):
+        if it % 100 == 0:
+            collect()
+        dt_val = dt[it]
+
+        reg_out, reg_state = reg_func(reg_state | state | {'dt': dt_val})
+        state = step_func(state | reg_out | {'dt': dt_val})
+        states.append(clone_tensor_dict(state))
+        reg_states.append(clone_tensor_dict(reg_state))
+    states = stack_tensor_dicts(states, dim=-1)
+    return states, stack_tensor_dicts(reg_states, dim=-1)
 
 
 # dims: (sample, time)
@@ -513,6 +557,36 @@ def plot_lf_case(case_num, data, data_sim=None):
     plt.show()
 
 
+def plot_lf_reg_sim(case_num, states, reg_states):
+    import matplotlib.pyplot as plt
+
+    t = torch.cumsum(states['dt'], dim=-1)
+
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10))
+    fig.canvas.mpl_connect('key_press_event', plt_on_key)
+
+    # plot trace by x and y
+    print(states.keys())
+    print(reg_states.keys())
+    print(states['v'])
+    print(states['line_dist'])
+    axs[0].plot(states['x'][case_num], states['y'][case_num], label='Robot trace', color='b')
+    axs[0].legend()
+    # axs[0].equal()  # This ensures the aspect ratio is 1:1
+
+    # Plot line_dist and line_sensor
+    axs[1].plot(t, states['line_dist'][case_num], label='Line distance', color='r')
+    axs[1].plot(t, states['line_sensor'][case_num], label='Line sensor', color='g')
+    axs[1].legend()
+
+    # Adjust layout
+    plt.tight_layout()
+
+    # Show the plot
+    # plt.show()
+    plt.savefig('reg_test.jpg')
+    
+
 def score_lf_fit(state_gt, state_sim):
     return (
         ((state_gt['dl'] - state_sim['dl']) ** 2.
@@ -547,23 +621,43 @@ def lf_score_result(state):
     return (state['x'].square() + state['y'].square()).sqrt()
 
 
-def score_reg_points(params, lf_model, sim_params):
-    reg = LFRegPID(params)
-    z = torch.zeros_like(params[..., 0])
-    ones = torch.ones_like(params[..., 0])
+def score_reg_points(reg_params, lf_model, sim_params):
+    reg = LFRegPID(reg_params)
+    z = torch.zeros_like(reg_params[..., 0])
+    n = 5000
     sim_scores, end_state = score_reg_fit(
-        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit, ones * 0.01,
-        dict(v=z, w=z, a=z, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
+        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit,
+        torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
+        dict(v=z, w=z, a=z + 3.14/8, x=z + .01, y=z + .001, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
         dict(state=z.unsqueeze(-1).expand(-1, 7)),
     )
-    return sim_scores - lf_score_result(end_state) + params.abs().mean(dim=-1) * .01
+    return sim_scores - lf_score_result(end_state) + reg_params.abs().mean(dim=-1) * .01
+
+
+def sim_reg_for_points(reg_params, lf_model, sim_params):
+    segments = sim_params['segments']
+    ncases = reg_params.shape[0]
+    nsegments = segments.shape[0]
+    reg_params = reg_params.repeat(nsegments, 1)
+    segments = segments.repeat(ncases, 1, 1)
+    sim_params = sim_params | {'segments': segments}
+
+    reg = LFRegPID(reg_params)
+    z = torch.zeros_like(reg_params[..., 0])
+    n = 5000
+    return sim_reg_fit(
+        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step,
+        torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
+        dict(v=z, w=z, a=z + 3.14/8, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
+        dict(state=z.unsqueeze(-1).expand(-1, 7)),
+    )
 
 
 def score_lf_points(params, lf_model, sim_params):
     segments = sim_params['segments']
     ncases = params.shape[0]
     nsegments = segments.shape[0]
-    params = params.repeat(nsegments, 1)
+    params = params.repeat_interleave(nsegments, dim=0)
     segments = segments.repeat(ncases, 1, 1)
 
     scores = score_reg_points(params, lf_model, sim_params | {'segments': segments})
@@ -664,6 +758,12 @@ def vis_params(data, params):
     # print(sim_score)
 
 
+def vis_reg_params(lf_params, reg_params, sim_params):
+    lf_model = LFModelSimple(lf_params)
+    states, reg_states = sim_reg_for_points(reg_params, lf_model, sim_params)
+    plot_lf_reg_sim(0, states, reg_states)
+
+
 @command()
 def test_model():
     data = prepare_lf_data('/home/pietrek/Downloads/mcal.xlsx')
@@ -697,6 +797,28 @@ def fit_model(device):
 
 @command()
 @option('--device', default='cpu')
+def test_reg(device):
+    lf_params = torch.tensor([
+        [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
+    ], dtype=torch.float64, device=device)
+    reg_params = torch.tensor([
+        [0.09524402495687526, 0.10064999438292863, 0.1294854702755163, 0.1259282067036361, 0.10038013122887864, 0.09785130292212005, 0.08051839997527192, 0.0832564439429463, 0.10597252741822924],
+        # [0, 0, 0, 0, 0, 0, 0, 0],
+    ], dtype=torch.float64, device=device)
+    lines = torch.tensor([
+        [[0, 0], [1, 1], [1, 0]],
+        [[0, 0], [1, 1], [0, 1]],
+        [[0, 0], [1, 1], [2, 2]],
+    ], dtype=torch.float64, device=device) * .1
+    sim_params = dict(
+        a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
+    )
+
+    vis_reg_params(lf_params, reg_params, sim_params)
+
+
+@command()
+@option('--device', default='cpu')
 def fit_reg(device):
     lf_params = torch.tensor([
         [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
@@ -707,8 +829,12 @@ def fit_reg(device):
         [[0, 0], [1, 1], [1, 0]],
         [[0, 0], [1, 1], [0, 1]],
         [[0, 0], [1, 1], [2, 2]],
+    ], dtype=torch.float64, device=device) * .1
+    reg_params = torch.tensor([
+        [.1, .1, .1, .1, .1, .1, .1, .1, .1, ],
+        # [0.0038920277958821104, 0.008603513289243235, 0.009827031776776251, 1.8180856652763038, 0.002980577764030595, 0.004931457883532552, 0.005333965270606706, 0.3211051111755025, 0.006565273130289069],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ], dtype=torch.float64, device=device)
-    reg_params = torch.zeros((2, 8), dtype=torch.float64, device=device) + .001
     moments = torch.zeros_like(reg_params)
     scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
 
