@@ -60,8 +60,10 @@ def _unflatten_matrix(data: torch.Tensor, x, y):
     s = data.shape
     return data.view(*s[:-1], x, y)
 
-def compute_pid(e, eprev, i, dt, kp, ki, kd):
+def compute_pid(e, eprev, i, dt, kp, ki, kd, ilimit=None):
     i += e * dt
+    if ilimit is not None:
+        i = i.clamp(-ilimit, ilimit)
     d = (e - eprev) / dt
     return kp * e + ki * i + kd * d, i
 
@@ -74,20 +76,22 @@ class LFRegPID:
         kp_turn = self.params[..., 0]
         ki_turn = self.params[..., 1]
         kd_turn = self.params[..., 2]
-        kadd_speed = self.params[..., 3]
-        kline_speed = self.params[..., 4]
-        kline2_speed = self.params[..., 5]
-        kp_mot = self.params[..., 6]
-        ki_mot = self.params[..., 7]
-        kd_mot = self.params[..., 8]
+        ilimit_turn = self.params[..., 3]
+        kadd_speed = self.params[..., 4]
+        kline_speed = self.params[..., 5]
+        limit_speed = self.params[..., 6]
+        kp_mot = self.params[..., 7]
+        ki_mot = self.params[..., 8]
+        ilimit_mot = self.params[..., 9]
 
         state = data['state']
         dt = data['dt']
         drot_l = data['drot_l']
         drot_r = data['drot_r']
-        line_pos = data['line_pos']
+        line_sensor = data['line_sensor']
+        # print(line_sensor)
 
-        line_pos_last = state[..., 0]
+        line_sensor_last = state[..., 0]
         iturn = state[..., 1]
         ispeed = state[..., 2]
         ileft = state[..., 3]
@@ -95,20 +99,19 @@ class LFRegPID:
         iright = state[..., 5]
         v_r_prev = state[..., 6]
 
-        cturn, iturn = compute_pid(line_pos, line_pos_last, iturn, dt, kp_turn, ki_turn, kd_turn)
-        # cspeed, ispeed = compute_pid(line_pos.abs(), line_pos_last.abs(), ispeed, dt, kp_speed, ki_speed, kd_speed)
-        ispeed += (kadd_speed - line_pos.abs() * kline_speed) * dt
-        ispeed = ispeed.clamp(0, 1)
+        cturn, iturn = compute_pid(line_sensor, line_sensor_last, iturn, dt, kp_turn, ki_turn, kd_turn, ilimit_turn)
+        ispeed += (kadd_speed - line_sensor.abs() * kline_speed) * dt
+        ispeed = ispeed.clamp(torch.zeros_like(limit_speed), limit_speed)
 
-        vl = ispeed * (1 - cturn)
+        vl = ispeed * (1 + cturn)
         vl_m = drot_l / dt
-        uleft, ileft = compute_pid(vl - vl_m, v_l_prev, ileft, dt, kp_mot, ki_mot, 0)
-        vr = ispeed * (1 + cturn)
+        uleft, ileft = compute_pid(vl - vl_m, v_l_prev, ileft, dt, kp_mot, ki_mot, 0, ilimit_mot)
+        vr = ispeed * (1 - cturn)
         vr_m = drot_r / dt
-        uright, iright = compute_pid(vr - vr_m, v_r_prev, iright, dt, kp_mot, ki_mot, 0)
+        uright, iright = compute_pid(vr - vr_m, v_r_prev, iright, dt, kp_mot, ki_mot, 0, ilimit_mot)
 
         state = torch.stack([
-            line_pos,
+            line_sensor,
             iturn,
             ispeed,
             ileft,
@@ -139,16 +142,16 @@ class LFRegTest:
         dt = data['dt']
         drot_l = data['drot_l']
         drot_r = data['drot_r']
-        line_pos = data['line_pos']
-        line_pos_last = data['line_pos_last']
+        line_sensor = data['line_sensor']
+        line_sensor_last = data['line_sensor_last']
 
         u = torch.stack([
             drot_l,
             # drot_l / dt,
             drot_r,
             # drot_r / dt,
-            line_pos,
-            (line_pos - line_pos_last) / dt,
+            line_sensor,
+            (line_sensor - line_sensor_last) / dt,
         ], dim=-1)
 
         state = state + (A * state + B * u) * dt
@@ -158,7 +161,7 @@ class LFRegTest:
             'u_l': y[..., 0],
             'u_r': y[..., 1],
         }, {
-            'line_pos_last': line_pos,
+            'line_sensor_last': line_sensor,
             'state': state,
         }
 
@@ -243,10 +246,10 @@ def linestring_distance_along(S, P, D):
     A, B = S[..., :-1, :], S[..., 1:, :]
 
     # Calculate direction vectors of the sections
-    V = B - A
+    AB = B - A
 
     # Calculate the denominator for the intersection formula
-    denominator = V[..., 0] * D[..., 1] - V[..., 1] * D[..., 0]
+    denominator = AB[..., 0] * D[..., 1] - AB[..., 1] * D[..., 0]
 
     # Check where denominator is not zero (i.e., lines are not parallel)
     non_parallel_mask = denominator.abs() > 1e-9
@@ -255,11 +258,8 @@ def linestring_distance_along(S, P, D):
     AP = P - A
     t = (AP[..., 0] * D[..., 1] - AP[..., 1] * D[..., 0]) / denominator
 
-    # Calculate the intersection points
-    intersection = A + t.unsqueeze(-1) * V
-
     # Calculate vector from point to intersection
-    vector_to_intersection = intersection - P
+    vector_to_intersection = t.unsqueeze(-1) * AB - AP
 
     # Calculate dot product to determine sign of distance
     dot_product = (vector_to_intersection * D).sum(dim=-1)
@@ -267,20 +267,39 @@ def linestring_distance_along(S, P, D):
     # Calculate distances only for valid intersections
     valid_intersections = (0 <= t) & (t <= 1) & non_parallel_mask
 
-    # Compute signed distances for valid intersections
-    distances = torch.where(valid_intersections, vector_to_intersection.norm(dim=-1), 1e9)
+    distances = vector_to_intersection.norm(dim=-1)
 
     # Assign negative distance if the dot product is negative
-    distances[valid_intersections & (dot_product < 0)] *= -1
+    distances[dot_product < 0] *= -1  # ????
+
+    # Compute signed distances for valid intersections
+    distances[~valid_intersections] = 1e9
 
     min_indices = torch.min(distances.abs(), dim=-1).indices
     return torch.gather(distances, -1, min_indices.unsqueeze(-1)).squeeze(-1)
 
 
+def linestring_distance_along_shapely(linestring, pt, v):
+    from shapely import LineString, Point, shortest_line
+
+    x, y = map(float, pt.coords[0])
+    pt_line = LineString(((x - v[0] * 10000, y - v[1] * 10000), (x + v[0] * 10000, y + v[1] * 10000)))
+    intersection = pt_line.intersection(linestring)
+    if intersection.is_empty:
+        return 1e9
+    intersection = shortest_line(intersection, pt).coords[0]
+    distance = Point(intersection).distance(pt)
+    ix, iy = intersection
+    dx, dy = ix - x, iy - y
+    if dx * v[0] + dy * v[1] < 0:
+        distance *= -1
+    return distance
+
+
 def test_linestring_distance_along():
     from shapely.geometry import LineString, Point
 
-    l = ((0, 0), (1, 2))
+    l = ((0, 0), (1, 2), (1, 0))
     pts = ((0, 0), (1, 2), (1, 1), (1, 1), (0.5, 0.5), (0, 2), (2, 0), (2, 2))
     d = ((1, 0), (0, 1), (-1, 0), (1, 0), (0, -1), (1, 0), (0, 1), (-1, 0))
 
@@ -289,7 +308,14 @@ def test_linestring_distance_along():
     d_tensor = torch.tensor(d, dtype=torch.float64)
     distances = linestring_distance_along(l_tensor, pts_tensor, d_tensor)
 
+    l_shapely = LineString(l)
+    distance_shapely = [
+        linestring_distance_along_shapely(l_shapely, Point(pt), v)
+        for pt, v in zip(pts, d)
+    ]
+
     print(tuple(float(d) for d in distances))
+    print(tuple(distance_shapely))
 
 
 # dims: (sample, time)
@@ -326,14 +352,11 @@ def score_sim_fit(
 
 # dims: (sample, time)
 def score_reg_fit(
-        step_func, reg_func, score_func, dt,
-        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor]
+    step_func, reg_func, score_func, dt,
+    state: Dict[str, torch.Tensor]
 ):
     state = {
         k: v.clone() for k, v in state.items()
-    }
-    reg_state = {
-        k: v.clone() for k, v in reg_state.items()
     }
     scores = []
     n = dt.shape[0]
@@ -342,8 +365,10 @@ def score_reg_fit(
             collect()
         dt_val = dt[it]
 
-        reg_out, reg_state = reg_func(reg_state | state | {'dt': dt_val})
-        state = step_func(state | reg_out | {'dt': dt_val})
+        state['dt'] = dt_val
+        reg_out, reg_state = reg_func(state)
+        state |= reg_state | reg_out
+        state |= step_func(state | reg_out)
         scores.append(score_func(state))
     scores = torch.stack(scores, dim=-1)
     return scores.mean(dim=-1), state
@@ -351,29 +376,25 @@ def score_reg_fit(
 
 def sim_reg_fit(
         step_func, reg_func, dt,
-        state: Dict[str, torch.Tensor], reg_state: Dict[str, torch.Tensor]
+        state: Dict[str, torch.Tensor]
 ):
     state = {
         k: v.clone() for k, v in state.items()
     }
-    reg_state = {
-        k: v.clone() for k, v in reg_state.items()
-    }
 
     states = []
-    reg_states = []
     n = dt.shape[0]
     for it in range(n):
         if it % 100 == 0:
             collect()
         dt_val = dt[it]
 
-        reg_out, reg_state = reg_func(reg_state | state | {'dt': dt_val})
-        state = step_func(state | reg_out | {'dt': dt_val})
+        state['dt'] = dt_val
+        reg_out, reg_state = reg_func(state)
+        state |= reg_state
+        state |= step_func(state | reg_out)
         states.append(clone_tensor_dict(state))
-        reg_states.append(clone_tensor_dict(reg_state))
-    states = stack_tensor_dicts(states, dim=-1)
-    return states, stack_tensor_dicts(reg_states, dim=-1)
+    return stack_tensor_dicts(states, dim=-1)
 
 
 # dims: (sample, time)
@@ -423,11 +444,13 @@ def lf_line_track_step(state, lf_model, params):
     P = torch.stack([state['x'] + dx, state['y'] + dy], dim=-1)
     D = torch.stack([dy, -dx], dim=-1)
     line_sensor = linestring_distance_along(S, P, D)
+    # print('...............', P, line_sensor)
 
     # update only values in visible distance
-    line_sensor = torch.where((line_sensor >= -max_d) & (line_sensor <= max_d), line_sensor, state['line_pos'])
+    line_sensor = torch.where(line_sensor.abs() <= max_d, line_sensor, state['line_sensor'])
+    # print(line_sensor)
 
-    return state | {
+    return {
         'line_dist': line_dist,
         'line_sensor': line_sensor,
         'drot_l': model_dx['dl'] * dt / r_wheel,
@@ -557,7 +580,7 @@ def plot_lf_case(case_num, data, data_sim=None):
     plt.show()
 
 
-def plot_lf_reg_sim(case_num, states, reg_states):
+def plot_lf_reg_sim(case_num, states):
     import matplotlib.pyplot as plt
 
     t = torch.cumsum(states['dt'], dim=-1)
@@ -567,7 +590,6 @@ def plot_lf_reg_sim(case_num, states, reg_states):
 
     # plot trace by x and y
     print(states.keys())
-    print(reg_states.keys())
     print(states['v'])
     print(states['line_dist'])
     axs[0].plot(states['x'][case_num], states['y'][case_num], label='Robot trace', color='b')
@@ -584,7 +606,7 @@ def plot_lf_reg_sim(case_num, states, reg_states):
 
     # Show the plot
     # plt.show()
-    plt.savefig('reg_test.jpg')
+    plt.savefig(f'reg_test_{case_num}.jpg')
     
 
 def score_lf_fit(state_gt, state_sim):
@@ -610,10 +632,12 @@ def score_points(data, params):
     return sim_scores + params.abs().mean(dim=-1) * .01
 
 
-def score_line_fit(state_sim):
+def score_line_trace(state_sim):
     return (
         state_sim['line_dist'] ** 2.
         + state_sim['line_sensor'] ** 2. * .01
+        + state_sim['u_l'] ** 2. * .001
+        + state_sim['u_r'] ** 2. * .001
     )
 
 
@@ -626,12 +650,14 @@ def score_reg_points(reg_params, lf_model, sim_params):
     z = torch.zeros_like(reg_params[..., 0])
     n = 5000
     sim_scores, end_state = score_reg_fit(
-        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_fit,
+        partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_trace,
         torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
-        dict(v=z, w=z, a=z + 3.14/8, x=z + .01, y=z + .001, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
-        dict(state=z.unsqueeze(-1).expand(-1, 7)),
+        dict(
+            v=z, w=z, a=z + 3.14/64, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
+            state=z.unsqueeze(-1).expand(-1, 7)
+        ),
     )
-    return sim_scores - lf_score_result(end_state) + reg_params.abs().mean(dim=-1) * .01
+    return sim_scores - lf_score_result(end_state) * 0.1 + reg_params.abs().mean(dim=-1) * .01
 
 
 def sim_reg_for_points(reg_params, lf_model, sim_params):
@@ -648,8 +674,10 @@ def sim_reg_for_points(reg_params, lf_model, sim_params):
     return sim_reg_fit(
         partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step,
         torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
-        dict(v=z, w=z, a=z + 3.14/8, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_pos=z),
-        dict(state=z.unsqueeze(-1).expand(-1, 7)),
+        dict(
+            v=z, w=z, a=z + 3.14/64, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
+            state=z.unsqueeze(-1).expand(-1, 7)
+        ),
     )
 
 
@@ -665,7 +693,8 @@ def score_lf_points(params, lf_model, sim_params):
 
 
 def validate_reg_params(params):
-    return torch.all(params > 0, dim=-1)
+    # return torch.all(params > 0, dim=-1)
+    return torch.all(torch.isfinite(params), dim=-1)
 
 
 # TODO: better interpolation
@@ -760,8 +789,10 @@ def vis_params(data, params):
 
 def vis_reg_params(lf_params, reg_params, sim_params):
     lf_model = LFModelSimple(lf_params)
-    states, reg_states = sim_reg_for_points(reg_params, lf_model, sim_params)
-    plot_lf_reg_sim(0, states, reg_states)
+    states = sim_reg_for_points(reg_params, lf_model, sim_params)
+    plot_lf_reg_sim(0, states)
+    plot_lf_reg_sim(1, states)
+    plot_lf_reg_sim(2, states)
 
 
 @command()
@@ -802,14 +833,14 @@ def test_reg(device):
         [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
     ], dtype=torch.float64, device=device)
     reg_params = torch.tensor([
-        [0.09524402495687526, 0.10064999438292863, 0.1294854702755163, 0.1259282067036361, 0.10038013122887864, 0.09785130292212005, 0.08051839997527192, 0.0832564439429463, 0.10597252741822924],
+        [-0.00875138735964047, 0.1315670498663548, -0.017842584133931808, -0.011426808389764505, -0.044353245451200264, 0.1456419373279614, -0.9774213989049209, 0.032970939837740854, -1.196010704228447, 0.13565721552353693],
         # [0, 0, 0, 0, 0, 0, 0, 0],
     ], dtype=torch.float64, device=device)
     lines = torch.tensor([
-        [[0, 0], [1, 1], [1, 0]],
-        [[0, 0], [1, 1], [0, 1]],
-        [[0, 0], [1, 1], [2, 2]],
-    ], dtype=torch.float64, device=device) * .1
+        [[0, 0], [1, 0], [2, 0]],
+        [[0, 0], [1, 0], [0, 2]],
+        [[0, 0], [1, 0], [2, 2]],
+    ], dtype=torch.float64, device=device)
     sim_params = dict(
         a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
     )
@@ -826,14 +857,15 @@ def fit_reg(device):
     lf_model = LFModelSimple(lf_params)
 
     lines = torch.tensor([
-        [[0, 0], [1, 1], [1, 0]],
-        [[0, 0], [1, 1], [0, 1]],
-        [[0, 0], [1, 1], [2, 2]],
-    ], dtype=torch.float64, device=device) * .1
+        [[0, 0], [1, 0], [2, 0]],
+        [[0, 0], [1, 0], [0, 2]],
+        [[0, 0], [1, 0], [2, 2]],
+    ], dtype=torch.float64, device=device)
     reg_params = torch.tensor([
-        [.1, .1, .1, .1, .1, .1, .1, .1, .1, ],
-        # [0.0038920277958821104, 0.008603513289243235, 0.009827031776776251, 1.8180856652763038, 0.002980577764030595, 0.004931457883532552, 0.005333965270606706, 0.3211051111755025, 0.006565273130289069],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ],
+        # [.1, .1, .1, .1, .1, .1, .1, .1, .1, .1],
+        # [0.11220104761046136, 0.3299570787721093, 0.06148778681022942, 0.19033877930755455, 0.18139384226846383, 0.12743106331034054, 8.610883595716484, 0.11845218261591935, 0.0837871900617534, 0.02599399297372216],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ], dtype=torch.float64, device=device)
     moments = torch.zeros_like(reg_params)
     scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
