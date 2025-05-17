@@ -583,7 +583,7 @@ def plot_lf_case(case_num, data, data_sim=None):
 def plot_lf_reg_sim(case_num, states):
     import matplotlib.pyplot as plt
 
-    t = torch.cumsum(states['dt'], dim=-1)
+    t = torch.cumsum(states['dt'], dim=-1).cpu()
 
     fig, axs = plt.subplots(2, 1, figsize=(12, 10))
     fig.canvas.mpl_connect('key_press_event', plt_on_key)
@@ -592,13 +592,13 @@ def plot_lf_reg_sim(case_num, states):
     print(states.keys())
     print(states['v'])
     print(states['line_dist'])
-    axs[0].plot(states['x'][case_num], states['y'][case_num], label='Robot trace', color='b')
+    axs[0].plot(states['x'][case_num].cpu(), states['y'][case_num].cpu(), label='Robot trace', color='b')
     axs[0].legend()
     # axs[0].equal()  # This ensures the aspect ratio is 1:1
 
     # Plot line_dist and line_sensor
-    axs[1].plot(t, states['line_dist'][case_num], label='Line distance', color='r')
-    axs[1].plot(t, states['line_sensor'][case_num], label='Line sensor', color='g')
+    axs[1].plot(t, states['line_dist'][case_num].cpu(), label='Line distance', color='r')
+    axs[1].plot(t, states['line_sensor'][case_num].cpu(), label='Line sensor', color='g')
     axs[1].legend()
 
     # Adjust layout
@@ -829,62 +829,64 @@ def fit_model(device):
 @command()
 @option('--device', default='cpu')
 def test_reg(device):
-    lf_params = torch.tensor([
-        [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
-    ], dtype=torch.float64, device=device)
-    reg_params = torch.tensor([
-        [0.07018429088617863, 0.04762796646186096, 0.056414583242351476, 0.08345442879974149, 0.14107744802199584, 0.0908383657405005, 0.12443464254980359, 0.10900887430201059, 0.15502905729888983, 0.06642774734033102],
-        # [0, 0, 0, 0, 0, 0, 0, 0],
-    ], dtype=torch.float64, device=device)
-    lines = torch.tensor([
-        [[0, 0], [1, 0], [2, 0]],
-        [[0, 0], [1, 0], [0, 2]],
-        [[0, 0], [1, 0], [2, 2]],
-    ], dtype=torch.float64, device=device)
-    sim_params = dict(
-        a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
-    )
+    with torch.no_grad():
+        lf_params = torch.tensor([
+            [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
+        ], dtype=torch.float64, device=device)
+        reg_params = torch.tensor([
+            [0.09528452797801899, 0.09368578642222204, 0.07463447585371039, 0.09877360297198107, 0.09430313599258489, 0.06982708528600161, 0.15481374070073453, 0.13425658708060226, 0.04892671053714839, 0.14033107756447633],
+            # [0, 0, 0, 0, 0, 0, 0, 0],
+        ], dtype=torch.float64, device=device)
+        lines = torch.tensor([
+            [[0, 0], [1, 0], [2, 0]],
+            [[0, 0], [1, 0], [0, 2]],
+            [[0, 0], [1, 0], [2, 2]],
+        ], dtype=torch.float64, device=device) * 10
+        sim_params = dict(
+            a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
+        )
 
-    vis_reg_params(lf_params, reg_params, sim_params)
+        vis_reg_params(lf_params, reg_params, sim_params)
 
 
 @command()
 @option('--device', default='cpu')
 def fit_reg(device):
-    lf_params = torch.tensor([
-        [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
-    ], dtype=torch.float64, device=device)
-    lf_model = LFModelSimple(lf_params)
+    with torch.no_grad():
+        lf_params = torch.tensor([
+            [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
+        ], dtype=torch.float64, device=device)
+        lf_model = LFModelSimple(lf_params)
 
-    lines = torch.tensor([
-        [[0, 0], [1, 0], [2, 0]],
-        [[0, 0], [1, 0], [0, 2]],
-        [[0, 0], [1, 0], [2, 2]],
-    ], dtype=torch.float64, device=device)
-    reg_params = torch.tensor([
-        # [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ],
-        [.1, .1, .1, .1, .1, .1, .1, .1, .1, .1],
-        # [0.11220104761046136, 0.3299570787721093, 0.06148778681022942, 0.19033877930755455, 0.18139384226846383, 0.12743106331034054, 8.610883595716484, 0.11845218261591935, 0.0837871900617534, 0.02599399297372216],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ], dtype=torch.float64, device=device)
-    moments = torch.zeros_like(reg_params)
-    scores = torch.tensor([1e9, 1e9], dtype=torch.float64, device=device)
+        lines = torch.tensor([
+            [[0, 0], [1, 0], [20, 0]],
+            [[0, 0], [1, 0], [0, 20]],
+            [[0, 0], [1, 0], [20, 20]],
+        ], dtype=torch.float64, device=device) * 10
+        reg_params = torch.tensor([
+            # [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ],
+            [.1, .1, .1, .1, .1, .1, .1, .1, .1, .1],
+            # [0.1188457779490493, 0.47228203986530837, 0.4041215452867388, 0.025638495958420767, 0.9881251407445925, 0.015019253285922504, 47.77342470806232, 0.07767061172733955, 0.8662492492701735, 0.9107006229606557],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ], dtype=torch.float64, device=device)
+        moments = torch.zeros_like(reg_params)
+        scores = torch.tensor([1e9, 1e9, ], dtype=torch.float64, device=device)
 
-    sim_params = dict(
-        a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
-    )
-
-    for it in range(100):
-        reg_params, scores, moments = search_step(
-            partial(score_lf_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
-            reg_params, scores, moments,
-            sim_params, 64
+        sim_params = dict(
+            a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
         )
-        # a *= .97
-        # print(params)
-        print(it, sim_params['a'], float(scores[0]), tuple(map(float, reg_params[0])))
-    print(lf_params.shape)
-    print(tuple(map(float, reg_params[0])))
+
+        for it in range(100):
+            reg_params, scores, moments = search_step(
+                partial(score_lf_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
+                reg_params, scores, moments,
+                sim_params, 1024
+            )
+            # a *= .97
+            # print(params)
+            print(it, sim_params['a'], float(scores[0]), tuple(map(float, reg_params[0])))
+        print(lf_params.shape)
+        print(tuple(map(float, reg_params[0])))
 
 
 if __name__ == '__main__':
