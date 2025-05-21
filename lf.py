@@ -82,7 +82,8 @@ class LFRegPID:
         limit_speed = self.params[..., 6]
         kp_mot = self.params[..., 7]
         ki_mot = self.params[..., 8]
-        ilimit_mot = self.params[..., 9]
+        kd_mot = self.params[..., 9]
+        ilimit_mot = self.params[..., 10]
 
         state = data['state']
         dt = data['dt']
@@ -95,29 +96,34 @@ class LFRegPID:
         iturn = state[..., 1]
         ispeed = state[..., 2]
         ileft = state[..., 3]
-        v_l_prev = state[..., 4]
+        e_l_prev = state[..., 4]
         iright = state[..., 5]
-        v_r_prev = state[..., 6]
+        e_r_prev = state[..., 6]
 
+        # print('--------------', line_sensor, line_sensor_last)
         cturn, iturn = compute_pid(line_sensor, line_sensor_last, iturn, dt, kp_turn, ki_turn, kd_turn, ilimit_turn)
         ispeed += (kadd_speed - line_sensor.abs() * kline_speed) * dt
         ispeed = ispeed.clamp(torch.zeros_like(limit_speed), limit_speed)
 
-        vl = ispeed * (1 + cturn)
+        vl = ispeed * (1 - cturn)
         vl_m = drot_l / dt
-        uleft, ileft = compute_pid(vl - vl_m, v_l_prev, ileft, dt, kp_mot, ki_mot, 0, ilimit_mot)
-        vr = ispeed * (1 - cturn)
+        e_l = vl - vl_m
+        uleft, ileft = compute_pid(e_l, e_l_prev, ileft, dt, kp_mot, ki_mot, kd_mot, ilimit_mot)
+        vr = ispeed * (1 + cturn)
         vr_m = drot_r / dt
-        uright, iright = compute_pid(vr - vr_m, v_r_prev, iright, dt, kp_mot, ki_mot, 0, ilimit_mot)
+        e_r = vr - vr_m
+        uright, iright = compute_pid(e_r, e_r_prev, iright, dt, kp_mot, ki_mot, kd_mot, ilimit_mot)
+
+        # print('!!!!!!!!!!!!!!', uleft, uright)
 
         state = torch.stack([
             line_sensor,
             iturn,
             ispeed,
             ileft,
-            vl_m,
+            e_l,
             iright,
-            vr_m,
+            e_r,
         ], dim=-1)
 
         return {
@@ -653,11 +659,11 @@ def score_reg_points(reg_params, lf_model, sim_params):
         partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step, score_line_trace,
         torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
         dict(
-            v=z, w=z, a=z + 3.14/64, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
+            v=z, w=z, a=z + 3.14/64, x=z+.01, y=z-.01, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
             state=z.unsqueeze(-1).expand(-1, 7)
         ),
     )
-    return sim_scores - lf_score_result(end_state) * 0.1 + reg_params.abs().mean(dim=-1) * .01
+    return sim_scores - lf_score_result(end_state) * .1 + reg_params.abs().mean(dim=-1) * .01
 
 
 def sim_reg_for_points(reg_params, lf_model, sim_params):
@@ -675,7 +681,7 @@ def sim_reg_for_points(reg_params, lf_model, sim_params):
         partial(lf_line_track_step, lf_model=lf_model, params=sim_params), reg.compute_step,
         torch.ones_like(reg_params[:1, 0]).repeat(n) * 0.01,
         dict(
-            v=z, w=z, a=z + 3.14/64, x=z, y=z, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
+            v=z, w=z, a=z + 3.14/64, x=z+.01, y=z-.01, dl=z, dr=z, drot_l=z, drot_r=z, line_sensor=z,
             state=z.unsqueeze(-1).expand(-1, 7)
         ),
     )
@@ -790,9 +796,8 @@ def vis_params(data, params):
 def vis_reg_params(lf_params, reg_params, sim_params):
     lf_model = LFModelSimple(lf_params)
     states = sim_reg_for_points(reg_params, lf_model, sim_params)
-    plot_lf_reg_sim(0, states)
-    plot_lf_reg_sim(1, states)
-    plot_lf_reg_sim(2, states)
+    for it in range(states['x'].shape[0]):
+        plot_lf_reg_sim(it, states)
 
 
 @command()
@@ -829,19 +834,21 @@ def fit_model(device):
 @command()
 @option('--device', default='cpu')
 def test_reg(device):
-    with torch.no_grad():
+    with torch.inference_mode():
         lf_params = torch.tensor([
             [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
         ], dtype=torch.float64, device=device)
         reg_params = torch.tensor([
-            [0.09528452797801899, 0.09368578642222204, 0.07463447585371039, 0.09877360297198107, 0.09430313599258489, 0.06982708528600161, 0.15481374070073453, 0.13425658708060226, 0.04892671053714839, 0.14033107756447633],
+            [1.7705734654693264, 0.5041871633283294, 0.13775492738923034, 0.026215076141577785, 2.3202036414377134, 0.11290563489064577, 106.31518134382023, 0.09357056535224194, 0.0022088191456681827, 1.8032512958061575e-06, 0.10597822390838066],
             # [0, 0, 0, 0, 0, 0, 0, 0],
         ], dtype=torch.float64, device=device)
         lines = torch.tensor([
-            [[0, 0], [1, 0], [2, 0]],
-            [[0, 0], [1, 0], [0, 2]],
-            [[0, 0], [1, 0], [2, 2]],
-        ], dtype=torch.float64, device=device) * 10
+            [[0, 0], [2, .05], [20, 10]],
+            [[0, 0], [1.5, -.05], [10, 20]],
+            [[0, 0], [1.2, .01], [20, 20]],
+            [[0, 0], [1.5, .1], [10, 20]],
+            [[0, 0], [.25, -.02], [5, 20]],
+        ], dtype=torch.float64, device=device)
         sim_params = dict(
             a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
         )
@@ -852,25 +859,27 @@ def test_reg(device):
 @command()
 @option('--device', default='cpu')
 def fit_reg(device):
-    with torch.no_grad():
+    with torch.inference_mode():
         lf_params = torch.tensor([
             [0.06690421842070352, 1.6685777799435322, 1.340981065985289, 5.751083839594803, 0.014004082325513676, 0.0026276411826163344, 5.140782116967004],
         ], dtype=torch.float64, device=device)
         lf_model = LFModelSimple(lf_params)
 
         lines = torch.tensor([
-            [[0, 0], [1, 0], [20, 0]],
-            [[0, 0], [1, 0], [0, 20]],
-            [[0, 0], [1, 0], [20, 20]],
-        ], dtype=torch.float64, device=device) * 10
+            [[0, 0], [2, .05], [20, 10]],
+            [[0, 0], [1.5, -.05], [10, 20]],
+            [[0, 0], [1.2, .01], [20, 20]],
+            [[0, 0], [1.5, .1], [10, 20]],
+            [[0, 0], [.25, -.02], [5, 20]],
+        ], dtype=torch.float64, device=device)
         reg_params = torch.tensor([
             # [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ],
-            [.1, .1, .1, .1, .1, .1, .1, .1, .1, .1],
-            # [0.1188457779490493, 0.47228203986530837, 0.4041215452867388, 0.025638495958420767, 0.9881251407445925, 0.015019253285922504, 47.77342470806232, 0.07767061172733955, 0.8662492492701735, 0.9107006229606557],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [.1, .1, .1, .1, .1, .1, .1, .1, .1, .1, .1],
+            [2.4412428180862094, 0.6429266446072572, 0.14861268954212808, 0.024600151551036786, 2.8192529322178843, 0.08238251172463415, 82.7216835657122, 0.09279805742766256, 0.002092433882416961, 5.362541601932549e-05, 0.11936847566964214],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ], dtype=torch.float64, device=device)
         moments = torch.zeros_like(reg_params)
-        scores = torch.tensor([1e9, 1e9, ], dtype=torch.float64, device=device)
+        scores = torch.tensor([1e9, 1e9, 1e9], dtype=torch.float64, device=device)
 
         sim_params = dict(
             a=1, b=5, segments=lines, lf_len=0.15, r_wheel=0.01
@@ -880,7 +889,7 @@ def fit_reg(device):
             reg_params, scores, moments = search_step(
                 partial(score_lf_points, lf_model=lf_model, sim_params=sim_params), validate_reg_params,
                 reg_params, scores, moments,
-                sim_params, 1024
+                sim_params, 64
             )
             # a *= .97
             # print(params)
